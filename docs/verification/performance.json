@@ -4,36 +4,56 @@
     "ledgerEntries": 200000
   },
   "database": "MySQL 8.4.13",
-  "verifiedAt": "2026-10-30T00:20:21.886555",
+  "verifiedAt": "2026-10-30T03:20:17.000098",
   "queries": {
     "orderGlobalPage": {
-      "milliseconds": [16.97, 11.13, 9.81],
-      "total": 200007,
+      "milliseconds": [
+        26.97,
+        22.32,
+        22.49
+      ],
+      "total": 200012,
       "returned": 20
     },
     "orderDeepPage": {
-      "milliseconds": [736.6, 739.29, 699.83],
+      "milliseconds": [
+        1059.79,
+        950.56,
+        1100.91
+      ],
       "total": 200000,
       "returned": 200
     },
     "orderExactSearch": {
-      "milliseconds": [2.81, 1.97, 1.75],
+      "milliseconds": [
+        3.99,
+        2.67,
+        3.45
+      ],
       "total": 1,
       "returned": 1
     },
     "dateFilter": {
-      "milliseconds": [58.03, 56.34, 56.75],
+      "milliseconds": [
+        39.78,
+        34.95,
+        31.67
+      ],
       "total": 200000,
       "returned": 20
     },
     "ledgerDeepPage": {
-      "milliseconds": [361.93, 356.78, 356.25],
+      "milliseconds": [
+        689.97,
+        661.6,
+        657.1
+      ],
       "total": 200000,
       "returned": 200
     }
   },
-  "exportMilliseconds": 8435.66,
-  "exportBytes": 956788,
+  "exportMilliseconds": 12287.89,
+  "exportBytes": 1627257,
   "exportDataRows": 200000,
   "temporaryDataRemoved": true,
   "balancedAfterCleanup": true

@@ -12,6 +12,12 @@ const props = defineProps<{ orderId: string }>(),
   error = ref(''),
   page = ref(1),
   total = ref(0);
+const busy = ref(false),
+  scope = ref('current'),
+  status = ref(''),
+  type = ref(''),
+  start = ref(''),
+  end = ref('');
 async function load(reset = true) {
   loading.value = true;
   error.value = '';
@@ -21,7 +27,18 @@ async function load(reset = true) {
     } else {
       if (reset) page.value = 1;
       const result = await api.get(
-        '/lists/orders?' + query({ pointId: state.pointId, page: page.value, size: 20 }),
+        '/lists/orders?' +
+          query({
+            pointId: scope.value === 'current' ? state.pointId : '',
+            payerId: scope.value === 'assisted' ? state.pointId : '',
+            page: page.value,
+            size: 20,
+            status: status.value,
+            type: type.value,
+            start: start.value,
+            end: end.value,
+            includeArchived: true,
+          }),
       );
       rows.value = reset ? result.items : [...rows.value, ...result.items];
       total.value = result.total;
@@ -35,6 +52,8 @@ async function load(reset = true) {
 }
 async function pay() {
   if (!detail.value) return;
+  if (busy.value) return;
+  busy.value = true;
   try {
     await showConfirmDialog({
       title: '确认演示支付',
@@ -46,12 +65,65 @@ async function pay() {
     showSuccessToast('演示支付完成');
   } catch (e) {
     if (e instanceof Error) fail(e);
+  } finally {
+    busy.value = false;
+  }
+}
+async function cancelUnpaid() {
+  if (!detail.value) return;
+  busy.value = true;
+  try {
+    await showConfirmDialog({ title: '取消未付款订单', confirmButtonText: '确认取消' });
+    await api.post('/orders/' + detail.value.id + '/cancel', { reason: '会员取消未付款订单' });
+    await load();
+    showSuccessToast('订单已取消');
+  } catch (e) {
+    if (e instanceof Error) fail(e);
+  } finally {
+    busy.value = false;
   }
 }
 onMounted(() => load());
 </script>
 <template>
   <div class="mobile-section-heading"><button @click="load()">刷新</button></div>
+  <template v-if="!orderId"
+    ><van-tabs v-model:active="scope" @change="load()"
+      ><van-tab title="当前点位" name="current" /><van-tab title="代付订单" name="assisted"
+    /></van-tabs>
+    <details class="mobile-card order-filters">
+      <summary>筛选订单</summary>
+      <label
+        >购买类型<select v-model="type">
+          <option value="">全部</option>
+          <option v-for="t in ['NEW', 'FIRST', 'REPEAT']" :key="t" :value="t">
+            {{ label(t) }}
+          </option>
+        </select></label
+      ><label
+        >订单状态<select v-model="status">
+          <option value="">全部</option>
+          <option
+            v-for="s in [
+              'UNPAID',
+              'PENDING',
+              'UNFULFILLED',
+              'APPLIED',
+              'PARTIAL',
+              'FULFILLED',
+              'CANCELLED',
+            ]"
+            :key="s"
+            :value="s"
+          >
+            {{ label(s) }}
+          </option>
+        </select></label
+      ><label>开始日期<input v-model="start" type="date" /></label
+      ><label>结束日期<input v-model="end" type="date" /></label
+      ><van-button block size="small" plain @click="load()">查询</van-button>
+    </details></template
+  >
   <van-notice-bar v-if="error" :text="error" color="#a25247" background="#fff2eb" />
   <template v-if="detail"
     ><section class="mobile-card order-detail">
@@ -61,6 +133,7 @@ onMounted(() => load());
       </div>
       <h2>¥{{ money(detail.total) }}</h2>
       <p>{{ detail.id }}</p>
+      <p v-if="detail.remark">备注：{{ detail.remark }}</p>
       <dl>
         <dt>购买点位</dt>
         <dd>{{ detail.pointId }}</dd>
@@ -68,6 +141,8 @@ onMounted(() => load());
         <dd>{{ detail.shopId }}</dd>
         <dt>商品数量</dt>
         <dd>{{ detail.quantity }} 瓶</dd>
+        <dt>商品</dt>
+        <dd>{{ detail.product?.name }}</dd>
         <dt>奖励积分</dt>
         <dd>¥{{ money(detail.rewardPaid) }}</dd>
         <dt>现金部分</dt>
@@ -89,7 +164,17 @@ onMounted(() => load());
         round
         type="primary"
         @click="pay"
+        :loading="busy"
         >确认演示支付</van-button
+      >
+      <van-button
+        v-if="!detail.cancelled && detail.paymentStatus === 'UNPAID'"
+        block
+        round
+        plain
+        :loading="busy"
+        @click="cancelUnpaid"
+        >取消订单</van-button
       >
       <p
         v-if="detail.paymentStatus === 'PAID' && detail.activationStatus === 'PENDING'"
@@ -129,7 +214,7 @@ onMounted(() => load());
         <span>{{ label(o.orderType) }} · {{ o.quantity }}瓶</span
         ><van-tag plain>{{ label(orderStatus(o)) }}</van-tag>
       </div>
-      <h3>初语山言 · 会员专供</h3>
+      <h3>{{ o.productName }}</h3>
       <p>{{ o.id }}</p>
       <div class="order-card-bottom">
         <span>{{ dateTime(o.createdAt) }}</span
@@ -152,3 +237,29 @@ onMounted(() => load());
     ></template
   ><van-loading v-if="loading" class="center-loading" size="22">加载中</van-loading>
 </template>
+<style scoped>
+.order-filters {
+  padding: 12px 16px;
+}
+.order-filters summary {
+  font-size: 13px;
+}
+.order-filters label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  font-size: 12px;
+  align-items: center;
+}
+.order-filters select,
+.order-filters input {
+  max-width: 185px;
+  min-height: 34px;
+  border: 1px solid #dce4d4;
+  border-radius: 5px;
+  padding: 6px;
+  background: white;
+  color: #365440;
+}
+</style>

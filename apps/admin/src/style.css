@@ -589,7 +589,8 @@ h4 {
 }
 .module-tabs {
   display: flex;
-  gap: 27px;
+  flex-wrap: wrap;
+  gap: 0 22px;
   border-bottom: 1px solid #e0e6dc;
   margin-bottom: 24px;
 }
@@ -627,6 +628,8 @@ h4 {
 }
 .list-subtoolbar {
   display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   justify-content: space-between;
   align-items: center;
   margin: 23px 0 18px;
@@ -635,6 +638,7 @@ h4 {
 }
 .list-subtoolbar > div {
   display: flex;
+  flex-wrap: wrap;
   gap: 9px;
   align-items: center;
 }
@@ -1172,4 +1176,13 @@ h4 {
 }
 .login-box h2 {
   margin-bottom: 28px;
+}
+
+.sidebar nav .nav-child {
+  padding: 10px 12px 10px 48px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.el-dialog {
+  max-width: calc(100vw - 32px);
 }

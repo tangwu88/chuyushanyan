@@ -24,7 +24,45 @@ public class RewardEngine {
       boolean planEligible,
       Set<String> identities,
       BigDecimal fixedPlan1,
-      BigDecimal fixedPlan2) {}
+      BigDecimal fixedPlan2,
+      BigDecimal salesRateOverride) {
+    public Node(
+        String id,
+        String parentId,
+        int grade,
+        int director,
+        String shop,
+        boolean active,
+        BigDecimal own,
+        BigDecimal team,
+        BigDecimal small,
+        BigDecimal repeat,
+        BigDecimal secondMarket,
+        int secondDirectors,
+        boolean planEligible,
+        Set<String> identities,
+        BigDecimal fixedPlan1,
+        BigDecimal fixedPlan2) {
+      this(
+          id,
+          parentId,
+          grade,
+          director,
+          shop,
+          active,
+          own,
+          team,
+          small,
+          repeat,
+          secondMarket,
+          secondDirectors,
+          planEligible,
+          identities,
+          fixedPlan1,
+          fixedPlan2,
+          null);
+    }
+  }
 
   public record Sale(
       String id,
@@ -99,7 +137,9 @@ public class RewardEngine {
       BigDecimal best = ZERO;
       for (Node n : ancestors(buyer.parentId(), ix)) {
         if (!n.active()) continue;
-        BigDecimal rate = r.salesRates.get(n.grade());
+        BigDecimal rate =
+            n.salesRateOverride() == null ? r.salesRates.get(n.grade()) : n.salesRateOverride();
+        require(rate.signum() >= 0 && rate.compareTo(BigDecimal.ONE) <= 0, "会员销售比例错误");
         if (rate.compareTo(best) > 0) {
           BigDecimal diff = rate.subtract(best), gross = sale.amount().multiply(diff);
           Award a =
@@ -183,8 +223,10 @@ public class RewardEngine {
   public static Map<String, BigDecimal> allocate(
       BigDecimal total, Map<String, BigDecimal> weights) {
     Map<String, BigDecimal> out = new TreeMap<>();
+    require(total.signum() >= 0, "奖池不能为负");
     if (weights.isEmpty()) return out;
-    BigDecimal sum = weights.values().stream().reduce(ZERO, BigDecimal::add);
+    BigDecimal sum =
+        weights.values().stream().map(cn.chuyu.shared.Money::max0).reduce(ZERO, BigDecimal::add);
     if (sum.signum() <= 0) {
       Map<String, BigDecimal> equal = new TreeMap<>();
       weights.keySet().forEach(k -> equal.put(k, BigDecimal.ONE));
@@ -239,7 +281,7 @@ public class RewardEngine {
           n.id(), equal.multiply(average).add(weighted.multiply(BigDecimal.ONE.subtract(average))));
     }
     var gross = allocate(total, weights);
-    var net = allocate(total.subtract(money(total.multiply(r.managementFee))), weights);
+    var fees = allocate(money(total.multiply(r.managementFee)), gross);
     for (Node n : people)
       out.add(
           new Award(
@@ -249,8 +291,8 @@ public class RewardEngine {
               money(basis),
               rate,
               gross.get(n.id()),
-              gross.get(n.id()).subtract(net.get(n.id())),
-              net.get(n.id()),
+              fees.get(n.id()),
+              gross.get(n.id()).subtract(fees.get(n.id())),
               "奖池"
                   + total
                   + "；平均占比"
@@ -367,7 +409,7 @@ public class RewardEngine {
           r);
     if (cycle.equals("MONTHLY")) {
       plan(out, r, nodes, report, period, true);
-      plan(out, r, nodes, repeat, period, false);
+      if (r.identities.get("A").enabled()) plan(out, r, nodes, repeat, period, false);
     }
     if (cycle.equals("MONTHLY_REPEAT")) {
       var seven = nodes.stream().filter(n -> n.active() && n.grade() == 7).toList();
@@ -436,7 +478,7 @@ public class RewardEngine {
     for (var e : r.identities.entrySet()) {
       if (e.getKey().equals("A")) continue;
       Rules.Identity rule = e.getValue();
-      if (!rule.cycle().equals(cycle)) continue;
+      if (!rule.enabled() || !rule.cycle().equals(cycle)) continue;
       BigDecimal basis =
           switch (rule.basis()) {
             case "REPORT" -> report;
@@ -448,7 +490,7 @@ public class RewardEngine {
           "IDENTITY_" + e.getKey(),
           period,
           basis,
-          rule.rate(),
+          rule.effectiveRate(r, basis),
           nodes.stream()
               .filter(
                   n ->

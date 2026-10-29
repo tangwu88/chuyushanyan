@@ -2,6 +2,7 @@ package cn.chuyu.rewards;
 
 import static cn.chuyu.shared.BusinessException.require;
 import static cn.chuyu.shared.Json.*;
+import static cn.chuyu.shared.Money.*;
 
 import cn.chuyu.shared.*;
 import java.util.*;
@@ -41,7 +42,11 @@ public class RuleService {
         .map(
             row -> {
               Map<String, Object> m = new LinkedHashMap<>(row);
-              m.put("config", read(text(row, "configJson"), Map.class));
+              m.put(
+                  "config",
+                  text(row, "status").equals("REFERENCE")
+                      ? read(text(row, "configJson"), Map.class)
+                      : read(write(read(text(row, "configJson"), Rules.class)), Map.class));
               m.remove("configJson");
               return m;
             })
@@ -49,7 +54,7 @@ public class RuleService {
   }
 
   public Map<String, Object> draft(Map<String, Object> body) {
-    Actors.require("rules:write");
+    Actors.requireGlobal("rules:write");
     String name = text(body, "name");
     require(!name.isBlank(), "请输入版本名称");
     Rules r = body.containsKey("config") ? read(write(body.get("config")), Rules.class) : current();
@@ -74,7 +79,7 @@ public class RuleService {
   }
 
   public Map<String, Object> save(String id, Map<String, Object> body) {
-    Actors.require("rules:write");
+    Actors.requireGlobal("rules:write");
     var before = db.required("SELECT * FROM rule_versions WHERE id=#{p.id}", map("id", id));
     require(text(before, "status").equals("DRAFT"), "已发布和参考版本不能覆盖修改");
     Rules r = read(write(body.get("config")), Rules.class);
@@ -87,7 +92,7 @@ public class RuleService {
   }
 
   public Map<String, Object> test(String id) {
-    Actors.require("rules:write");
+    Actors.requireGlobal("rules:write");
     var row = db.required("SELECT * FROM rule_versions WHERE id=#{p.id}", map("id", id));
     require(text(row, "status").equals("DRAFT"), "只能对草稿进行发布试算");
     Rules r = get(id);
@@ -106,10 +111,26 @@ public class RuleService {
   }
 
   public Map<String, Object> publish(String id) {
-    Actors.require("rules:write");
+    Actors.requireGlobal("rules:write");
     var row = db.required("SELECT * FROM rule_versions WHERE id=#{p.id}", map("id", id));
     Rules r = get(id);
     r.validate();
+    require(
+        db.count(
+                "SELECT COUNT(*) FROM wallets w JOIN member_points p ON p.id=w.point_id WHERE"
+                    + " w.point_id=#{p.id} AND w.kind='REWARD' AND p.active=TRUE AND"
+                    + " p.activated=TRUE",
+                map("id", r.recoveryPoint))
+            == 1,
+        "积分回收账户不存在或不可用");
+    for (var v :
+        db.list(
+            "SELECT DISTINCT grade_version FROM member_points WHERE id NOT IN"
+                + " ('SYSTEM','RECOVERY')"))
+      require(r.gradeVersions.containsKey(text(v, "gradeVersion")), "不能移除仍有会员使用的等级版本");
+    for (var member : db.list("SELECT identities FROM member_points WHERE identities<>''"))
+      for (String code : text(member, "identities").split(","))
+        require(code.isBlank() || r.identities.containsKey(code), "不能移除仍有会员使用的特殊身份，请先取消该身份或改为停用");
     require(
         text(row, "status").equals("DRAFT") && hash(write(r)).equals(text(row, "testedHash")),
         "规则修改后必须重新完成试算，才能发布");
@@ -123,5 +144,80 @@ public class RuleService {
         map("id", id));
     db.audit("RULE_PUBLISH", id, previous, id, "试算通过后发布");
     return map("id", id, "status", "ACTIVE");
+  }
+
+  public Map<String, Object> compare(String left, String right) {
+    Actors.require("rules:read");
+    var a = db.required("SELECT * FROM rule_versions WHERE id=#{p.id}", map("id", left));
+    var b = db.required("SELECT * FROM rule_versions WHERE id=#{p.id}", map("id", right));
+    var changes = new ArrayList<Map<String, Object>>();
+    diff(
+        "",
+        text(a, "status").equals("REFERENCE")
+            ? read(text(a, "configJson"), Map.class)
+            : comparisonValue(get(left)),
+        text(b, "status").equals("REFERENCE")
+            ? read(text(b, "configJson"), Map.class)
+            : comparisonValue(get(right)),
+        changes);
+    List<Map<String, Object>> scenarios = new ArrayList<>();
+    if (!text(a, "status").equals("REFERENCE") && !text(b, "status").equals("REFERENCE")) {
+      var first = ScenarioCatalog.run(get(left));
+      var second = ScenarioCatalog.run(get(right));
+      for (int i = 0; i < first.size(); i++)
+        scenarios.add(
+            map(
+                "title",
+                first.get(i).title(),
+                "before",
+                first.get(i).result().net(),
+                "after",
+                second.get(i).result().net(),
+                "difference",
+                second.get(i).result().net().subtract(first.get(i).result().net())));
+    }
+    return map(
+        "left", a.get("name"), "right", b.get("name"), "changes", changes, "scenarios", scenarios);
+  }
+
+  // Compare typed decimals by value. Text identifiers such as recovery accounts retain leading
+  // zeros.
+  private Object comparisonValue(Object value) {
+    if (value instanceof java.math.BigDecimal n) return n.stripTrailingZeros();
+    if (value instanceof Map<?, ?> values) {
+      Map<String, Object> out = new LinkedHashMap<>();
+      values.forEach((k, v) -> out.put(k.toString(), comparisonValue(v)));
+      return out;
+    }
+    if (value instanceof Collection<?> values)
+      return values.stream().map(this::comparisonValue).toList();
+    try {
+      if (value instanceof Rules r) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (var field : Rules.class.getFields())
+          if (!java.lang.reflect.Modifier.isStatic(field.getModifiers()))
+            out.put(field.getName(), comparisonValue(field.get(r)));
+        return out;
+      }
+      if (value != null && value.getClass().isRecord()) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (var field : value.getClass().getRecordComponents())
+          out.put(field.getName(), comparisonValue(field.getAccessor().invoke(value)));
+        return out;
+      }
+      return value;
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException("无法比较规则结构", e);
+    }
+  }
+
+  private void diff(String path, Object before, Object after, List<Map<String, Object>> out) {
+    if (before instanceof Map<?, ?> a && after instanceof Map<?, ?> b) {
+      Set<String> keys = new TreeSet<>();
+      a.keySet().forEach(k -> keys.add(k.toString()));
+      b.keySet().forEach(k -> keys.add(k.toString()));
+      for (String k : keys) diff(path.isBlank() ? k : path + "." + k, a.get(k), b.get(k), out);
+    } else if (!Objects.equals(write(before), write(after)))
+      out.add(map("field", path, "before", before, "after", after));
   }
 }

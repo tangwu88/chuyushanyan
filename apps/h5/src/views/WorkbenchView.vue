@@ -18,6 +18,11 @@ const router = useRouter(),
   busy = ref(false),
   selected = ref<string[]>([]),
   eligible = ref<Row[]>([]);
+const eligiblePage = ref(1),
+  eligibleTotal = ref(0),
+  shippingQuote = ref<Row | null>(null),
+  shipmentDetail = ref<Row | null>(null),
+  deletedTopups = ref(false);
 const showStock = ref(false),
   stockForm = ref<Row>({ toId: '', amount: '', paymentPassword: '' });
 async function stockTransfer() {
@@ -42,7 +47,7 @@ async function stockTransfer() {
 const shippingForm = ref<Row>({ recipient: '', phone: '', address: '', pickup: false });
 const canShip = computed(
   () =>
-    Number(shop.value.recharge?.balance) >= Number(state.config.rules?.shippingThreshold || 10000),
+    Number(shop.value.recharge?.balance) >= Number(state.config.rules?.shippingThreshold ?? 10000),
 );
 async function load(reset = true) {
   loading.value = true;
@@ -50,7 +55,13 @@ async function load(reset = true) {
   if (reset) page.value = 1;
   try {
     const resource =
-      tab.value === 'shipments' ? 'shipments' : tab.value === 'topups' ? 'topups' : 'orders';
+      tab.value === 'shipments'
+        ? 'shipments'
+        : tab.value === 'topups'
+          ? 'topups'
+          : tab.value === 'stock'
+            ? 'stock-transfers'
+            : 'orders';
     const result = await api.get(
       '/lists/' +
         resource +
@@ -60,6 +71,10 @@ async function load(reset = true) {
           status: tab.value === 'pending' ? 'PENDING' : tab.value === 'available' ? 'ACTIVE' : '',
           page: page.value,
           size: 20,
+          available: tab.value === 'available',
+          includeCancelled: tab.value === 'available',
+          includeArchived: true,
+          deleted: tab.value === 'topups' && deletedTopups.value,
         }),
     );
     rows.value = reset ? result.items : [...rows.value, ...result.items];
@@ -127,19 +142,8 @@ async function requestTopup() {
 async function openShipping() {
   loading.value = true;
   try {
-    const result = await api.get(
-      '/lists/orders?' + query({ shopId: shop.value.id, status: 'ACTIVE', size: 200 }),
-    );
-    eligible.value = [];
-    for (const o of result.items) {
-      const d = await api.get('/orders/' + o.id);
-      if (d.availableQuantity > 0)
-        eligible.value.push({
-          ...o,
-          availableQuantity: d.availableQuantity,
-          shipQuantity: d.availableQuantity,
-        });
-    }
+    eligiblePage.value = 1;
+    await loadEligible();
     selected.value = [];
     shippingForm.value = { recipient: '', phone: shop.value.phone, address: '', pickup: false };
     showShipping.value = true;
@@ -149,16 +153,94 @@ async function openShipping() {
     loading.value = false;
   }
 }
+async function loadEligible(reset = true) {
+  const result = await api.get(
+    '/lists/orders?' +
+      query({
+        shopId: shop.value.id,
+        available: true,
+        includeCancelled: true,
+        size: 100,
+        page: eligiblePage.value,
+      }),
+  );
+  result.items.forEach((o: Row) => (o.shipQuantity = o.availableQuantity));
+  eligible.value = reset ? result.items : [...eligible.value, ...result.items];
+  eligibleTotal.value = result.total;
+  shippingQuote.value = null;
+}
+async function selectAll() {
+  busy.value = true;
+  try {
+    while (eligible.value.length < eligibleTotal.value) {
+      eligiblePage.value++;
+      await loadEligible(false);
+    }
+    selected.value = eligible.value
+      .filter(
+        (o) =>
+          !o.cancelled && o.availableQuantity > 0 && !!o.pickup === !!shippingForm.value.pickup,
+      )
+      .map((o) => o.id);
+  } catch (e) {
+    fail(e);
+  } finally {
+    busy.value = false;
+  }
+}
+async function moreEligible() {
+  busy.value = true;
+  try {
+    eligiblePage.value++;
+    await loadEligible(false);
+  } catch (e) {
+    eligiblePage.value--;
+    fail(e);
+  } finally {
+    busy.value = false;
+  }
+}
+async function showShipment(id: string) {
+  try {
+    shipmentDetail.value = await api.get('/shipments/' + id);
+  } catch (e) {
+    fail(e);
+  }
+}
+async function deleteTopup(row: Row) {
+  try {
+    await showConfirmDialog({ title: row.deleted ? '找回充值申请' : '删除充值申请' });
+    await api.post('/topups/' + row.id + (row.deleted ? '/restore' : '/delete'), {
+      reason: row.deleted ? '店铺找回申请' : '店铺删除待审批申请',
+    });
+    await load();
+  } catch (e) {
+    if (e instanceof Error) fail(e);
+  }
+}
 async function requestShipping() {
   busy.value = true;
   try {
-    await api.post('/shipments', {
+    const body = {
       ...shippingForm.value,
       shopId: shop.value.id,
       lines: eligible.value
         .filter((o) => selected.value.includes(o.id))
         .map((o) => ({ orderId: o.id, quantity: o.shipQuantity })),
+    };
+    shippingQuote.value = await api.post('/shipping-quotes', body);
+    await showConfirmDialog({
+      title: '确认发货申请',
+      message:
+        '商品金额 ¥' +
+        money(shippingQuote.value?.goodsAmount) +
+        '\n重量 ' +
+        shippingQuote.value?.weightKg +
+        'kg\n运费 ¥' +
+        money(shippingQuote.value?.freightAmount),
+      confirmButtonText: '提交申请',
     });
+    await api.post('/shipments', { ...body, expectedFreight: shippingQuote.value?.freightAmount });
     showShipping.value = false;
     tab.value = 'shipments';
     await load();
@@ -212,8 +294,13 @@ onMounted(() => load());
   <van-tabs v-model:active="tab"
     ><van-tab title="待激活" name="pending" /><van-tab title="待发货" name="available" /><van-tab
       title="发货记录"
-      name="shipments" /><van-tab title="充值审批" name="topups" /></van-tabs
+      name="shipments" /><van-tab title="充值审批" name="topups" /><van-tab
+      title="转货记录"
+      name="stock" /></van-tabs
   ><van-notice-bar v-if="error" :text="error" color="#a25247" background="#fff2eb" />
+  <div v-if="tab === 'topups'" class="form-inline">
+    <span>已删除申请</span><van-switch v-model="deletedTopups" size="20" @change="load()" />
+  </div>
   <section class="store-order-list">
     <article v-for="o in rows" :key="o.id" class="mobile-card">
       <template v-if="tab === 'shipments'"
@@ -223,6 +310,9 @@ onMounted(() => load());
         </div>
         <p>{{ o.id }}</p>
         <p>{{ o.pickup ? '自提' : (o.carrier || '待登记物流') + ' ' + (o.tracking || '') }}</p>
+        <van-tag v-if="Number(o.cancelledLines) > 0" type="danger" plain>含已撤销订单</van-tag>
+        <p>商品金额 ¥{{ money(o.goodsAmount) }} · 运费 ¥{{ money(o.freightAmount) }}</p>
+        <van-button size="small" plain @click="showShipment(o.id)">查看明细</van-button>
         <small>{{ dateTime(o.createdAt) }}</small></template
       >
       <template v-else-if="tab === 'topups'"
@@ -231,6 +321,18 @@ onMounted(() => load());
           ><van-tag plain>{{ label(o.status) }}</van-tag>
         </div>
         <p>{{ o.id }}</p>
+        <p v-if="o.reason">审批说明：{{ o.reason }}</p>
+        <van-button v-if="o.status === 'PENDING'" size="small" plain @click="deleteTopup(o)">{{
+          o.deleted ? '找回申请' : '删除申请'
+        }}</van-button>
+        <small>{{ dateTime(o.createdAt) }}</small></template
+      >
+      <template v-else-if="tab === 'stock'"
+        ><div class="order-card-head">
+          <b>转货 ¥{{ money(o.amount) }}</b>
+        </div>
+        <p>转出 {{ o.fromId }}</p>
+        <p>接收 {{ o.toId }}</p>
         <small>{{ dateTime(o.createdAt) }}</small></template
       >
       <template v-else
@@ -244,8 +346,10 @@ onMounted(() => load());
           ><strong>¥{{ money(o.total) }}</strong>
         </div>
         <div class="store-order-actions">
-          <button class="danger-text" :disabled="busy" @click="cancel(o)">撤销</button
+          <button v-if="!o.cancelled" class="danger-text" :disabled="busy" @click="cancel(o)">
+            撤销</button
           ><button @click="router.push('/orders/' + o.id)">查看详情</button
+          ><van-tag v-if="o.cancelled" type="danger" plain>已撤销</van-tag
           ><van-button
             v-if="tab === 'pending'"
             type="primary"
@@ -330,20 +434,36 @@ onMounted(() => load());
       v-model="shippingForm.address"
       label="地址"
       placeholder="请输入收货地址"
-    /><van-checkbox-group v-model="selected"
+    />
+    <div class="shipping-select-actions">
+      <van-button size="small" plain :loading="busy" @click="selectAll">全选可发货订单</van-button
+      ><van-button size="small" plain @click="selected = []">清空选择</van-button>
+    </div>
+    <van-checkbox-group v-model="selected"
       ><div
         v-for="o in eligible.filter((x) => !!x.pickup === !!shippingForm.pickup)"
         :key="o.id"
         class="ship-choice"
       >
-        <van-checkbox :name="o.id"
+        <van-checkbox :name="o.id" :disabled="o.cancelled" :aria-disabled="o.cancelled"
           ><b>{{ label(o.orderType) }} · {{ o.pointId }}</b
-          ><small>{{ o.id }} · 可申请{{ o.availableQuantity }}瓶</small></van-checkbox
+          ><small
+            >{{ o.id }} ·
+            {{ o.cancelled ? '已撤销' : '可申请' + o.availableQuantity + '瓶' }}</small
+          ></van-checkbox
         ><van-stepper
           v-model="o.shipQuantity"
           :min="1"
           :max="o.availableQuantity"
+          :disabled="o.cancelled"
         /></div></van-checkbox-group
+    ><van-button
+      v-if="eligible.length < eligibleTotal"
+      block
+      plain
+      :loading="busy"
+      @click="moreEligible"
+      >加载更多订单</van-button
     ><van-empty v-if="!eligible.length" description="暂无可申请发货的订单" /><van-button
       block
       round
@@ -354,4 +474,35 @@ onMounted(() => load());
       >提交发货申请（{{ selected.length }}笔）</van-button
     ></van-popup
   >
+  <van-popup
+    :show="!!shipmentDetail"
+    position="bottom"
+    round
+    closeable
+    class="shipping-popup"
+    @close="shipmentDetail = null"
+    ><h2>发货明细</h2>
+    <p>{{ shipmentDetail?.application?.recipient }} · {{ shipmentDetail?.application?.phone }}</p>
+    <p>{{ shipmentDetail?.application?.address }}</p>
+    <p>{{ shipmentDetail?.application?.carrier }} {{ shipmentDetail?.application?.tracking }}</p>
+    <p>
+      运费 ¥{{ money(shipmentDetail?.application?.freightAmount) }} · 重量
+      {{ shipmentDetail?.application?.weightKg }}kg
+    </p>
+    <article v-for="line in shipmentDetail?.lines || []" :key="line.id" class="mobile-card">
+      <b>{{ line.orderId }}</b>
+      <p>{{ label(line.orderType) }} · {{ line.quantity }}瓶</p>
+      <van-tag v-if="line.cancelled || line.orderCancelled" type="danger">订单已撤销</van-tag>
+    </article></van-popup
+  >
 </template>
+<style scoped>
+.shipping-select-actions {
+  display: flex;
+  gap: 12px;
+  margin: 18px 0;
+}
+.store-order-list .van-tag--danger {
+  margin: 8px 0;
+}
+</style>

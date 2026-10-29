@@ -1,8 +1,8 @@
 {
-  "verifiedAt": "2026-10-29T17:00:53.414153+00:00",
+  "verifiedAt": "2026-10-30T03:42:44.672142",
   "java": {
     "runtime": "Java 21",
-    "command": "TZ=UTC mvn -Duser.timezone=UTC verify",
+    "command": "mvn -f backend/pom.xml verify",
     "suites": [
       {
         "name": "cn.chuyu.BusinessIntegrationTest",
@@ -10,7 +10,23 @@
         "failures": "0",
         "errors": "0",
         "skipped": "0",
-        "time": "4.223"
+        "time": "4.075"
+      },
+      {
+        "name": "cn.chuyu.RequirementsAuditTest",
+        "tests": "25",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "3.81"
+      },
+      {
+        "name": "cn.chuyu.RewardEdgeCasesTest",
+        "tests": "8",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.098"
       },
       {
         "name": "cn.chuyu.RewardEngineTest",
@@ -18,7 +34,7 @@
         "failures": "0",
         "errors": "0",
         "skipped": "0",
-        "time": "0.249"
+        "time": "0.095"
       }
     ]
   },
@@ -27,6 +43,6 @@
     "adminTypecheckAndBuild": "passed",
     "h5TypecheckAndBuild": "passed"
   },
-  "database": "MySQL 8.4.13; server global UTC, business connection Asia/Shanghai",
+  "database": "MySQL 8.4.13; business connection Asia/Shanghai",
   "containerExecution": "not_run_on_local_machine"
 }

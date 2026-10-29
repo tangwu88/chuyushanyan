@@ -8,6 +8,8 @@ import cn.chuyu.funds.Ledger;
 import cn.chuyu.members.MemberService;
 import cn.chuyu.rewards.RuleService;
 import cn.chuyu.shared.*;
+import cn.chuyu.system.ManagementService;
+import java.math.BigDecimal;
 import java.util.*;
 import org.springframework.stereotype.Service;
 
@@ -17,12 +19,19 @@ public class FulfilmentService {
   private final MemberService members;
   private final Ledger ledger;
   private final RuleService rules;
+  private final ManagementService management;
 
-  public FulfilmentService(Store db, MemberService members, Ledger ledger, RuleService rules) {
+  public FulfilmentService(
+      Store db,
+      MemberService members,
+      Ledger ledger,
+      RuleService rules,
+      ManagementService management) {
     this.db = db;
     this.members = members;
     this.ledger = ledger;
     this.rules = rules;
+    this.management = management;
   }
 
   public List<Map<String, Object>> lines(String id) {
@@ -42,10 +51,88 @@ public class FulfilmentService {
   }
 
   @SuppressWarnings("unchecked")
+  public Map<String, Object> quote(Map<String, Object> b) {
+    String shop = text(b, "shopId");
+    var point = members.point(shop);
+    if (Actors.member()) members.own(shop);
+    else {
+      Actors.require("shipping:read");
+      Actors.requirePoint(point);
+    }
+    require(
+        bool(point.get("active"))
+            && bool(point.get("activated"))
+            && !text(point, "shopType").equals("NONE"),
+        "请选择有效店铺");
+    List<Map<String, Object>> lines = (List<Map<String, Object>>) b.get("lines");
+    require(lines != null && !lines.isEmpty(), "请至少选择一条订单明细");
+    BigDecimal weight = ZERO, goods = ZERO;
+    String channel = "";
+    Set<String> seen = new HashSet<>();
+    boolean pickup = bool(b.get("pickup"));
+    for (var line : lines) {
+      String order = text(line, "orderId");
+      require(seen.add(order), "订单不能重复选择");
+      var o = db.required("SELECT * FROM shop_orders WHERE id=#{p.id}", map("id", order));
+      int quantity = integer(line.get("quantity"));
+      require(
+          text(o, "shopId").equals(shop)
+              && !bool(o.get("cancelled"))
+              && text(o, "activationStatus").equals("ACTIVE")
+              && bool(o.get("pickup")) == pickup,
+          "订单不符合本次发货条件");
+      require(
+          quantity > 0 && quantity <= integer(o.get("quantity")) - allocated(order), "发货数量超过可申请数量");
+      Map<String, Object> snapshot = read(text(o, "memberSnapshot"), Map.class);
+      Map<String, Object> product =
+          snapshot.get("product") instanceof Map<?, ?>
+              ? (Map<String, Object>) snapshot.get("product")
+              : snapshot;
+      String current = text(product, "channel");
+      if (current.isBlank()) current = "初语山言";
+      if (channel.isBlank()) channel = current;
+      require(channel.equals(current), "不同渠道的订单请分别申请发货");
+      weight = weight.add(d(product.get("weightKg")).multiply(d(quantity)));
+      goods = goods.add(d(o.get("unitPrice")).multiply(d(quantity)));
+    }
+    BigDecimal finalWeight = weight;
+    String finalChannel = channel;
+    Map<String, Object> freight =
+        pickup
+            ? Map.of()
+            : management.rows("freights", true).stream()
+                .filter(
+                    r ->
+                        text(r, "channel").equals(finalChannel)
+                            && d(r.get("maxWeight")).compareTo(finalWeight) >= 0)
+                .sorted(
+                    Comparator.comparing((Map<String, Object> r) -> d(r.get("maxWeight")))
+                        .thenComparing(r -> integer(r.get("sortNo"))))
+                .findFirst()
+                .orElseThrow(() -> new BusinessException("所选渠道和重量尚未配置运费"));
+    return map(
+        "channel",
+        channel,
+        "weightKg",
+        weight,
+        "goodsAmount",
+        money(goods),
+        "freightAmount",
+        pickup ? ZERO : d(freight.get("amount")),
+        "freightRule",
+        freight,
+        "pickup",
+        pickup);
+  }
+
+  @SuppressWarnings("unchecked")
   public Map<String, Object> apply(Map<String, Object> b) {
     String shop = text(b, "shopId");
     if (Actors.member()) members.own(shop);
-    else Actors.require("shipping:review");
+    else {
+      Actors.require("shipping:review");
+      Actors.requirePoint(members.point(shop));
+    }
     require(!text(members.point(shop), "shopType").equals("NONE"), "请选择店铺");
     require(
         d(ledger.wallet(shop, "RECHARGE").get("balance"))
@@ -60,6 +147,11 @@ public class FulfilmentService {
     String recipient = text(b, "recipient"), phone = text(b, "phone"), address = text(b, "address");
     require(!recipient.isBlank() && phone.matches("[0-9]{6,24}"), "请填写收货人和有效电话");
     require(pickup || !address.isBlank(), "请填写收货地址");
+    var price = quote(b);
+    require(
+        !b.containsKey("expectedFreight")
+            || d(b.get("expectedFreight")).compareTo(d(price.get("freightAmount"))) == 0,
+        "运费有变化，请重新计算");
     db.exec(
         "INSERT INTO"
             + " fulfilment_applications(id,shop_id,status,pickup,recipient,phone,address,request_by)"
@@ -79,6 +171,21 @@ public class FulfilmentService {
             address,
             "actor",
             Actors.current().id()));
+    db.exec(
+        "UPDATE fulfilment_applications SET"
+            + " weight_kg=#{p.weight},goods_amount=#{p.goods},freight_amount=#{p.freight},freight_snapshot=#{p.snapshot}"
+            + " WHERE id=#{p.id}",
+        map(
+            "id",
+            id,
+            "weight",
+            price.get("weightKg"),
+            "goods",
+            price.get("goodsAmount"),
+            "freight",
+            price.get("freightAmount"),
+            "snapshot",
+            write(price)));
     for (var line : lines) {
       String order = text(line, "orderId");
       require(seen.add(order), "同一订单明细不能重复选择");
@@ -105,6 +212,7 @@ public class FulfilmentService {
   public Map<String, Object> review(String id, Map<String, Object> b) {
     Actors.require("shipping:review");
     var a = db.required("SELECT * FROM fulfilment_applications WHERE id=#{p.id}", map("id", id));
+    Actors.requirePoint(members.point(text(a, "shopId")));
     require(text(a, "status").equals("PENDING"), "此发货申请已审批");
     require(!text(b, "reason").isBlank(), "请填写审批说明");
     boolean approved = bool(b.get("approved"));
@@ -129,6 +237,7 @@ public class FulfilmentService {
   public Map<String, Object> ship(String id, Map<String, Object> b) {
     Actors.require("shipping:ship");
     var a = db.required("SELECT * FROM fulfilment_applications WHERE id=#{p.id}", map("id", id));
+    Actors.requirePoint(members.point(text(a, "shopId")));
     require(text(a, "status").equals("APPROVED"), "需先审批再发货");
     boolean pickup = bool(a.get("pickup"));
     String carrier = text(b, "carrier"), tracking = text(b, "tracking");

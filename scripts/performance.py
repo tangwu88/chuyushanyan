@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """200k temporary orders and 200k zero-value ledger entries in the local demo only."""
-import datetime,io,json,subprocess,time,urllib.request,zipfile,xml.etree.ElementTree as E
+import datetime,io,json,os,subprocess,time,urllib.request,zipfile,xml.etree.ElementTree as E
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent.parent
 MYSQL=ROOT/'.tools/mysql-8.4.13-macos15-arm64/bin/mysql'
 SOCKET=ROOT/'.runtime/mysql.sock'
-BASE='http://127.0.0.1:18080/api/v1'
+BASE=os.environ.get('CHUYU_API','http://127.0.0.1:18080/api/v1')
+DATABASE=os.environ.get('CHUYU_DB','chuyu_demo')
+assert DATABASE.replace('_','').isalnum(), 'Invalid demo database name'
 def sql(s):
-    return subprocess.check_output([str(MYSQL),'--no-defaults','--socket='+str(SOCKET),'-uroot','-N','-B','chuyu_demo'],input=s.encode()).decode().strip()
+    return subprocess.check_output([str(MYSQL),'--no-defaults','--socket='+str(SOCKET),'-uroot','-N','-B',DATABASE],input=s.encode()).decode().strip()
 def request(path,token='',data=None):
     headers={'Content-Type':'application/json'}
     if token:headers['Authorization']='Bearer '+token

@@ -42,6 +42,5 @@
       stroke="#9aab87"
       stroke-width=".8"
     />
-    <text x="125" y="200" text-anchor="middle" font-size="6" fill="#e3d8b0">150mL</text>
   </svg>
 </template>

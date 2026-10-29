@@ -53,7 +53,10 @@ public class FundsService {
     usable(from);
     paymentPassword(b);
     require(!from.equals(to), "不能转给同一个点位");
-    var recipient = members.point(to);
+    var recipient =
+        to.equals(rules.current().recoveryPoint)
+            ? db.required("SELECT * FROM member_points WHERE id=#{p.id}", map("id", to))
+            : members.point(to);
     require(bool(recipient.get("active")) && bool(recipient.get("activated")), "收款账户不可用");
     BigDecimal amount = input(b.get("amount"));
     require(amount.compareTo(d(1)) >= 0, "最少转账金额1元");
@@ -139,12 +142,32 @@ public class FundsService {
         null,
         map("pointId", point, "gross", amount, "bank", mask),
         "演示提现申请");
+    String identity = text(b, "identityNumber");
+    String maskId =
+        identity.length() > 6
+            ? identity.substring(0, 3) + "********" + identity.substring(identity.length() - 3)
+            : "";
+    require(text(b, "bankName").length() <= 128 && text(b, "accountName").length() <= 64, "开户资料过长");
+    db.exec(
+        "UPDATE withdrawals SET"
+            + " bank_name=#{p.bank},account_name=#{p.account},identity_mask=#{p.identity} WHERE"
+            + " id=#{p.id}",
+        map(
+            "id",
+            id,
+            "bank",
+            text(b, "bankName"),
+            "account",
+            text(b, "accountName"),
+            "identity",
+            maskId));
     return map("id", id, "gross", amount, "fee", fee, "tax", tax, "net", net);
   }
 
   public Map<String, Object> reviewWithdrawal(String id, Map<String, Object> b) {
     Actors.require("withdraw:review");
     var row = db.required("SELECT * FROM withdrawals WHERE id=#{p.id}", map("id", id));
+    Actors.requirePoint(members.point(text(row, "pointId")));
     require(text(row, "status").equals("PENDING"), "提现已处理");
     require(!text(row, "requestBy").equals(Actors.current().id()), "提现需要另一名财务人员审核");
     boolean approved = bool(b.get("approved"));
@@ -192,7 +215,12 @@ public class FundsService {
     var shop = members.point(point);
     if (Actors.member()) members.own(point);
     else Actors.require("funds:write");
-    require(!text(shop, "shopType").equals("NONE"), "此账户不是店铺");
+    if (!Actors.member()) Actors.requirePoint(shop);
+    require(
+        !text(shop, "shopType").equals("NONE")
+            && bool(shop.get("active"))
+            && bool(shop.get("activated")),
+        "此账户不是有效店铺");
     BigDecimal amount = input(b.get("amount"));
     String id = id();
     db.exec(
@@ -206,7 +234,10 @@ public class FundsService {
   public Map<String, Object> reviewTopup(String id, Map<String, Object> b) {
     Actors.require("funds:write");
     var row = db.required("SELECT * FROM topups WHERE id=#{p.id}", map("id", id));
+    Actors.requirePoint(members.point(text(row, "shopId")));
     require(text(row, "status").equals("PENDING"), "充值申请已处理");
+    require(!bool(row.get("deleted")), "此充值申请已删除，请先找回");
+    require(!text(b, "reason").isBlank(), "请填写审批说明");
     boolean approved = bool(b.get("approved"));
     if (approved)
       ledger.post(
@@ -218,14 +249,18 @@ public class FundsService {
               Ledger.Change.money(
                   text(row, "shopId"), "RECHARGE", d(row.get("amount")), "店铺充值审批到账", false)));
     db.exec(
-        "UPDATE topups SET status=#{p.status},review_by=#{p.actor} WHERE id=#{p.id}",
+        "UPDATE topups SET"
+            + " status=#{p.status},review_by=#{p.actor},reason=#{p.reason},reviewed_at=CURRENT_TIMESTAMP"
+            + " WHERE id=#{p.id}",
         map(
             "id",
             id,
             "status",
             approved ? "APPROVED" : "REJECTED",
             "actor",
-            Actors.current().id()));
+            Actors.current().id(),
+            "reason",
+            text(b, "reason")));
     db.audit("TOPUP_REVIEW", id, row, b, text(b, "reason"));
     return map("id", id);
   }
@@ -234,8 +269,10 @@ public class FundsService {
     Actors.require("funds:write");
     String point = text(b, "pointId"), kind = text(b, "kind"), why = text(b, "reason");
     members.point(point);
+    Actors.requirePoint(members.point(point));
     require(!why.isBlank(), "请填写调整原因");
     BigDecimal amount = money(b.get("amount"));
+    require(d(b.get("amount")).scale() <= 2, "调整金额最多两位小数");
     require(amount.signum() != 0, "调整金额不能为零");
     String id = id();
     ledger.post(
@@ -248,13 +285,37 @@ public class FundsService {
     return map("id", id);
   }
 
+  public Map<String, Object> archiveTopup(String id, boolean restore, Map<String, Object> b) {
+    var row = db.required("SELECT * FROM topups WHERE id=#{p.id}", map("id", id));
+    if (Actors.member()) members.own(text(row, "shopId"));
+    else {
+      Actors.require("funds:write");
+      Actors.requirePoint(members.point(text(row, "shopId")));
+    }
+    require(text(row, "status").equals("PENDING"), "只有待审批申请可以删除或找回");
+    require(!text(b, "reason").isBlank(), "请填写原因");
+    require(bool(row.get("deleted")) == restore, restore ? "此申请无需找回" : "此申请已删除");
+    db.exec(
+        "UPDATE topups SET deleted=#{p.deleted} WHERE id=#{p.id}",
+        map("id", id, "deleted", !restore));
+    db.audit(restore ? "TOPUP_RESTORE" : "TOPUP_DELETE", id, row, null, text(b, "reason"));
+    return map("id", id);
+  }
+
   public Map<String, Object> stockTransfer(Map<String, Object> b) {
     String from = text(b, "fromId"), to = text(b, "toId");
     if (Actors.member()) {
       usable(from);
       paymentPassword(b);
     } else Actors.require("funds:write");
+    if (!Actors.member()) {
+      Actors.requirePoint(members.point(from));
+      Actors.requirePoint(members.point(to));
+    }
     require(!from.equals(to), "不能转给同一店铺");
+    require(
+        bool(members.point(from).get("active")) && bool(members.point(to).get("active")),
+        "转货双方必须为有效店铺");
     require(
         !text(members.point(from), "shopType").equals("NONE")
             && !text(members.point(to), "shopType").equals("NONE"),

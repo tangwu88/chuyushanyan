@@ -81,7 +81,7 @@ public class SettlementService {
   }
 
   public Map<String, Object> preview(Map<String, Object> b) {
-    Actors.require("funds:write");
+    Actors.requireGlobal("funds:write");
     String cycle = text(b, "cycle"), period = text(b, "period"), rule = text(b, "ruleId");
     if (rule.isBlank()) rule = rules.currentId();
     var c = context(cycle, period, rule);
@@ -164,10 +164,13 @@ public class SettlementService {
   }
 
   public Map<String, Object> post(String id) {
-    Actors.require("funds:write");
+    Actors.requireGlobal("funds:write");
     var batch = db.required("SELECT * FROM settlement_batches WHERE id=#{p.id}", map("id", id));
     require(text(batch, "status").equals("PREVIEW"), "此账期已经入账");
     Context c = read(text(batch, "snapshotJson"), Context.class);
+    var version =
+        db.required("SELECT status FROM rule_versions WHERE id=#{p.id}", map("id", c.ruleId()));
+    require(Set.of("ACTIVE", "ARCHIVED").contains(text(version, "status")), "只有已发布规则可以正式入账");
     require(
         !LocalDateTime.parse(c.end()).isAfter(LocalDateTime.now(Store.ZONE)), "进行中的账期只能预览，结束后才能入账");
     require(
@@ -200,9 +203,9 @@ public class SettlementService {
         BigDecimal increment = max0(end.get(p).small().subtract(start.get(p).small()));
         for (var offset :
             db.list(
-                "SELECT * FROM performance_offsets WHERE point_id=#{p.id} AND remaining>0 ORDER BY"
-                    + " created_at,id",
-                map("id", p))) {
+                "SELECT * FROM performance_offsets WHERE point_id=#{p.id} AND remaining>0 AND"
+                    + " created_at<#{p.end} ORDER BY created_at,id",
+                map("id", p, "end", Timestamp.valueOf(LocalDateTime.parse(c.end()))))) {
           BigDecimal used = increment.min(d(offset.get("remaining")));
           if (used.signum() <= 0) break;
           db.exec(

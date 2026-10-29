@@ -134,6 +134,7 @@ public class PerformanceService {
     for (var w : db.list("SELECT * FROM wallets"))
       wallets.put(text(w, "pointId") + ":" + text(w, "kind"), w);
     List<Map<String, Object>> out = new ArrayList<>();
+    var qualified = qualifiedOwners(points, LocalDateTime.now(Store.ZONE).plusSeconds(1));
     for (var p : points) {
       var s = metrics.get(text(p, "id"));
       Map<String, Object> m = new LinkedHashMap<>(p);
@@ -143,9 +144,44 @@ public class PerformanceService {
       m.put("repeat", s.repeat());
       m.put("reward", wallets.get(text(p, "id") + ":REWARD"));
       m.put("recharge", wallets.get(text(p, "id") + ":RECHARGE"));
+      m.put(
+          "childCount",
+          points.stream().filter(c -> text(c, "parentId").equals(text(p, "id"))).count());
+      m.put(
+          "planQualified",
+          switch (text(p, "planOverride")) {
+            case "YES" -> true;
+            case "NO" -> false;
+            default ->
+                qualified.getOrDefault(text(p, "ownerId"), false) && integer(p.get("grade")) >= 6;
+          });
       out.add(m);
     }
     return out;
+  }
+
+  private Map<String, Boolean> qualifiedOwners(
+      List<Map<String, Object>> points, LocalDateTime end) {
+    Map<String, String> owners = new HashMap<>();
+    points.forEach(p -> owners.put(text(p, "id"), text(p, "ownerId")));
+    Map<String, LocalDateTime> first = new HashMap<>();
+    Map<String, BigDecimal> amounts = new HashMap<>();
+    for (var order :
+        db.list(
+            "SELECT point_id,total,activated_at FROM shop_orders WHERE order_type<>'REPEAT' AND"
+                + " activation_status='ACTIVE' AND activated_at<#{p.end} AND (cancelled=FALSE OR"
+                + " cancelled_at>=#{p.end}) ORDER BY activated_at,id",
+            map("end", Timestamp.valueOf(end)))) {
+      String owner = owners.get(text(order, "pointId"));
+      if (owner == null) continue;
+      var at = LocalDateTime.parse(text(order, "activatedAt"));
+      var start = first.computeIfAbsent(owner, k -> at);
+      if (!at.isAfter(start.plusHours(72)))
+        amounts.merge(owner, d(order.get("total")), BigDecimal::add);
+    }
+    Map<String, Boolean> result = new HashMap<>();
+    amounts.forEach((owner, amount) -> result.put(owner, amount.compareTo(d("24000")) >= 0));
+    return result;
   }
 
   public List<RewardEngine.Node> nodes(LocalDateTime start, LocalDateTime end) {
@@ -159,11 +195,12 @@ public class PerformanceService {
     points.forEach(p -> ix.put(text(p, "id"), p));
     var offsetRows =
         db.list(
-            "SELECT point_id,SUM(remaining) amount FROM performance_offsets WHERE remaining>0 GROUP"
-                + " BY point_id");
+            "SELECT point_id,SUM(remaining) amount FROM performance_offsets WHERE remaining>0 AND"
+                + " created_at<#{p.end} GROUP BY point_id",
+            map("end", Timestamp.valueOf(end)));
     Map<String, BigDecimal> offsets = new HashMap<>();
     offsetRows.forEach(p -> offsets.put(text(p, "pointId"), d(p.get("amount"))));
-    Map<String, Boolean> qualified = new HashMap<>();
+    Map<String, Boolean> qualified = qualifiedOwners(points, end);
     List<RewardEngine.Node> out = new ArrayList<>();
     for (var p : points) {
       String id = text(p, "id");
@@ -198,37 +235,7 @@ public class PerformanceService {
                     .count();
       }
       String owner = text(p, "ownerId");
-      boolean plan =
-          qualified.computeIfAbsent(
-              owner,
-              k -> {
-                var first =
-                    db.one(
-                        "SELECT MIN(o.activated_at) first_at FROM shop_orders o JOIN member_points"
-                            + " m ON m.id=o.point_id WHERE m.owner_id=#{p.owner} AND"
-                            + " o.order_type<>'REPEAT' AND o.activation_status='ACTIVE' AND"
-                            + " o.cancelled=FALSE AND o.activated_at<#{p.end}",
-                        map("owner", owner, "end", Timestamp.valueOf(end)));
-                if (first == null || first.get("firstAt") == null) return false;
-                LocalDateTime f = LocalDateTime.parse(text(first, "firstAt"));
-                var amount =
-                    db.required(
-                        "SELECT COALESCE(SUM(o.total),0) amount FROM shop_orders o JOIN"
-                            + " member_points m ON m.id=o.point_id WHERE m.owner_id=#{p.owner} AND"
-                            + " o.order_type<>'REPEAT' AND o.activation_status='ACTIVE' AND"
-                            + " o.cancelled=FALSE AND o.activated_at>=#{p.start} AND"
-                            + " o.activated_at<=#{p.finish} AND o.activated_at<#{p.end}",
-                        map(
-                            "owner",
-                            owner,
-                            "start",
-                            Timestamp.valueOf(f),
-                            "finish",
-                            Timestamp.valueOf(f.plusHours(72)),
-                            "end",
-                            Timestamp.valueOf(end)));
-                return d(amount.get("amount")).compareTo(d("24000")) >= 0;
-              });
+      boolean plan = qualified.getOrDefault(owner, false);
       plan =
           switch (text(p, "planOverride")) {
             case "YES" -> true;
@@ -253,13 +260,44 @@ public class PerformanceService {
               plan,
               identities,
               p.get("fixedPlan1") == null ? null : d(p.get("fixedPlan1")),
-              p.get("fixedPlan2") == null ? null : d(p.get("fixedPlan2"))));
+              p.get("fixedPlan2") == null ? null : d(p.get("fixedPlan2")),
+              p.get("salesRateOverride") == null ? null : d(p.get("salesRateOverride"))));
     }
     return out;
   }
 
   public List<RewardEngine.Node> currentNodes() {
     return nodes(null, LocalDateTime.now(Store.ZONE).plusSeconds(1));
+  }
+
+  public int eligibleGrade(Map<String, Object> point) {
+    var points = points();
+    var stats =
+        metrics(points, LocalDateTime.now(Store.ZONE).plusSeconds(1)).get(text(point, "id"));
+    return eligibleGrade(point, stats, points, rules.current());
+  }
+
+  private int eligibleGrade(
+      Map<String, Object> point, Stats stats, List<Map<String, Object>> points, Rules rule) {
+    int grade =
+        stats.own().compareTo(d("5960")) >= 0 ? 2 : stats.own().compareTo(d("1490")) >= 0 ? 1 : 0;
+    long refs =
+        points.stream()
+            .filter(
+                c ->
+                    text(c, "parentId").equals(text(point, "id"))
+                        && bool(c.get("isMain"))
+                        && bool(c.get("active"))
+                        && bool(c.get("activated"))
+                        && !text(c, "ownerId").equals(text(point, "ownerId")))
+            .count();
+    if (refs >= rule.directReferrals) grade = Math.max(grade, 1);
+    for (var threshold :
+        rule.gradeVersions.getOrDefault(
+            text(point, "gradeVersion"), rule.gradeVersions.get(rule.newMemberGradeVersion)))
+      if (stats.team().compareTo(threshold.team()) >= 0
+          && stats.small().compareTo(threshold.small()) >= 0) grade = threshold.grade();
+    return grade;
   }
 
   public void refreshGrades(boolean allowDowngrade) {
@@ -270,22 +308,7 @@ public class PerformanceService {
     for (var p : points) {
       if (!bool(p.get("activated")) || bool(p.get("emptyPoint"))) continue;
       Stats s = metrics.get(text(p, "id"));
-      int grade = s.own().compareTo(d("5960")) >= 0 ? 2 : s.own().compareTo(d("1490")) >= 0 ? 1 : 0;
-      long refs =
-          points.stream()
-              .filter(
-                  c ->
-                      text(c, "parentId").equals(text(p, "id"))
-                          && bool(c.get("isMain"))
-                          && bool(c.get("active"))
-                          && bool(c.get("activated"))
-                          && !text(c, "ownerId").equals(text(p, "ownerId")))
-              .count();
-      if (refs >= r.directReferrals) grade = Math.max(grade, 1);
-      for (var threshold :
-          r.gradeVersions.getOrDefault(text(p, "gradeVersion"), r.gradeVersions.get("v2")))
-        if (s.team().compareTo(threshold.team()) >= 0
-            && s.small().compareTo(threshold.small()) >= 0) grade = threshold.grade();
+      int grade = eligibleGrade(p, s, points, r);
       if (!allowDowngrade) grade = Math.max(grade, integer(p.get("grade")));
       if (grade != integer(p.get("grade"))) {
         db.exec(
@@ -337,7 +360,7 @@ public class PerformanceService {
                                               ? integer(q.get("grade")) == 7
                                               : integer(q.get("directorGrade")) >= l - 1)))
                   .count();
-          if (count >= (level == 1 ? 2 : 3)) target = level;
+          if (count >= r.directorMarketCounts.get(level - 1)) target = level;
         }
         if (!allowDowngrade) target = Math.max(target, integer(p.get("directorGrade")));
         if (target != integer(p.get("directorGrade"))) {

@@ -3,13 +3,14 @@ import { ref, computed, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showSuccessToast } from 'vant';
 import { api, state, hydrate, selectedPoint, fail } from './state';
-import { money, grade, label, availableBalance } from '@chuyu/shared';
+import { money, grade, label, availableBalance, safeHtml, type Row } from '@chuyu/shared';
 import ProductArt from './components/ProductArt.vue';
 import OrderView from './views/OrderView.vue';
 import WalletView from './views/WalletView.vue';
 import WorkbenchView from './views/WorkbenchView.vue';
 import OrdersView from './views/OrdersView.vue';
 import RegisterView from './views/RegisterView.vue';
+import NetworkView from './views/NetworkView.vue';
 const route = useRoute(),
   router = useRouter(),
   page = computed(() => String(route.params.page || 'home')),
@@ -23,6 +24,18 @@ const username = ref('member'),
   newPassword = ref(''),
   newPayment = ref('');
 const isShop = computed(() => state.points.some((p) => p.shopType !== 'NONE' && p.active));
+const appearance = computed(() => state.content.appearance?.[0] || {}),
+  agreement = computed(() =>
+    state.content.agreements?.find((r: Row) => r.id === String(route.params.id || '')),
+  ),
+  pageStyle = computed(() => ({
+    background:
+      page.value === 'home'
+        ? appearance.value.homeBackground
+        : page.value === 'agreement'
+          ? appearance.value.richBackground
+          : appearance.value.pageBackground,
+  }));
 const titles: Record<string, string> = {
   home: '初语山言',
   order: '确认下单',
@@ -32,18 +45,21 @@ const titles: Record<string, string> = {
   orders: route.params.id ? '订单详情' : '我的订单',
   register: '新增会员',
   password: '账户设置',
+  agreement: '协议',
+  network: '推荐网络',
 };
 async function login(demo?: string) {
   busy.value = true;
   error.value = '';
   try {
-    state.user = await api.login(demo || username.value, demo ? 'ChuyuDemo!2026' : password.value);
-    if (state.user.role !== 'MEMBER') {
+    const user = await api.login(demo || username.value, demo ? 'ChuyuDemo!2026' : password.value);
+    if (user.role !== 'MEMBER') {
       api.token = '';
       state.user = null;
       throw new Error('请使用会员或店铺账号登录');
     }
-    if (!state.user.mustChangePassword) await hydrate();
+    if (user.mustChangePassword) state.user = user;
+    else await hydrate();
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -78,8 +94,13 @@ async function logout() {
   } catch {}
   api.token = '';
   state.user = null;
+  state.points = [];
+  state.assisted = [];
 }
 onMounted(async () => {
+  try {
+    state.content = await api.get('/content');
+  } catch {}
   if (api.token)
     try {
       await hydrate();
@@ -140,7 +161,8 @@ onMounted(async () => {
       >保存并继续</van-button
     >
   </main>
-  <div v-else class="mobile-app">
+  <main v-else-if="!point.id" class="mobile-password"><van-loading>加载中</van-loading></main>
+  <div v-else class="mobile-app" :style="pageStyle">
     <header class="mobile-header">
       <button
         v-if="!['home', 'my', 'workbench', 'order'].includes(page) || route.params.id"
@@ -155,7 +177,7 @@ onMounted(async () => {
         >{{ page === 'orders' && route.params.id ? '订单详情' : titles[page] || '初语山言'
         }}<small class="env-mini">演示</small></strong
       ><button class="point-button" @click="showPoints = true">
-        {{ point.isMain ? '主号' : '小号' + point.sequenceNo }} ⌄
+        {{ point.isMain ? '主号' : '小号' + (Number(point.sequenceNo) - 1) }} ⌄
       </button>
     </header>
     <div class="point-context">
@@ -164,7 +186,15 @@ onMounted(async () => {
     </div>
     <main class="mobile-content">
       <template v-if="page === 'home'"
-        ><section class="home-shortcuts">
+        ><van-swipe v-if="state.content.banners?.length" :autoplay="4000" class="home-banners"
+          ><van-swipe-item v-for="banner in state.content.banners" :key="banner.id"
+            ><a :href="banner.link || undefined"
+              ><img :src="banner.imageUrl" :alt="banner.name" /></a></van-swipe-item></van-swipe
+        ><van-notice-bar
+          v-if="state.content.announcements?.length"
+          :text="state.content.announcements.map((r: Row) => r.content).join('　')"
+        />
+        <section class="home-shortcuts">
           <button @click="router.push('/orders')"><span>▤</span>我的订单</button
           ><button @click="router.push('/wallet')"><span>◈</span>奖励积分</button
           ><button @click="router.push('/register')"><span>♧</span>新增会员</button
@@ -173,17 +203,29 @@ onMounted(async () => {
         </section>
         <div class="mobile-section-heading"><h2>商品</h2></div>
         <article v-for="product in state.catalog.products" :key="product.id" class="product-card">
-          <div class="product-picture"><ProductArt /></div>
+          <div class="product-picture">
+            <img
+              v-if="product.imageUrl"
+              :src="product.imageUrl"
+              :alt="product.name"
+              class="product-image"
+            /><ProductArt v-else />
+          </div>
           <div class="product-copy">
             <h3>{{ product.name }}</h3>
-            <p>150mL / 瓶 · {{ product.weightKg }}kg</p>
+            <p>{{ product.specification || '瓶' }} · {{ product.weightKg }}kg</p>
             <strong>¥{{ money(product.firstPrice) }}</strong>
             <div>
               <button @click="router.push('/order?product=' + product.id)">购买</button
               ><button
-                v-if="Number(point.grade) >= 1"
+                v-if="
+                  Number(point.grade) >= 1 &&
+                  String(product.purchaseTypes || 'NEW,FIRST,REPEAT')
+                    .split(',')
+                    .includes('REPEAT')
+                "
                 class="subtle-button"
-                @click="router.push('/order?type=REPEAT')"
+                @click="router.push('/order?type=REPEAT&product=' + product.id)"
               >
                 会员复购
               </button>
@@ -193,7 +235,12 @@ onMounted(async () => {
       >
       <OrderView
         v-else-if="page === 'order'"
-        :key="state.pointId + String(route.query.type || '')"
+        :key="
+          state.pointId +
+          String(route.query.type || '') +
+          String(route.query.product || '') +
+          String(route.query.point || '')
+        "
       />
       <WalletView v-else-if="page === 'wallet'" :key="state.pointId" />
       <WorkbenchView v-else-if="page === 'workbench' && isShop" />
@@ -202,7 +249,13 @@ onMounted(async () => {
         :key="state.pointId + String(route.params.id || '')"
         :order-id="String(route.params.id || '')"
       />
-      <RegisterView v-else-if="page === 'register'" />
+      <RegisterView v-else-if="page === 'register'" :key="state.pointId" />
+      <NetworkView v-else-if="page === 'network'" :key="state.pointId" />
+      <article v-else-if="page === 'agreement'" class="mobile-card agreement-content">
+        <h2>{{ agreement?.name || '协议' }}</h2>
+        <div v-if="agreement?.content" v-html="safeHtml(agreement.content)" />
+        <van-empty v-else description="暂无内容" />
+      </article>
       <template v-else-if="page === 'password'"
         ><div class="mobile-card">
           <h2>更新密码</h2>
@@ -239,10 +292,10 @@ onMounted(async () => {
             <span>可用奖励积分</span><strong>{{ money(availableBalance(point.reward)) }}</strong
             ><small>冻结 {{ money(point.reward?.frozen) }}</small>
           </button>
-          <div>
+          <button @click="router.push('/wallet?kind=RECHARGE')">
             <span>充值积分</span><strong>{{ money(point.recharge?.balance) }}</strong
             ><small>受限 {{ money(point.recharge?.restricted) }}</small>
-          </div>
+          </button>
         </section>
         <section class="performance-card mobile-card">
           <h3>当前点位业绩</h3>
@@ -276,6 +329,14 @@ onMounted(async () => {
             title="账户与支付密码"
             is-link
             @click="router.push('/password')" /><van-cell
+            title="推荐网络"
+            is-link
+            @click="router.push('/network')" /><van-cell
+            v-for="item in state.content.agreements || []"
+            :key="item.id"
+            :title="item.name"
+            is-link
+            @click="router.push('/agreement/' + encodeURIComponent(item.id))" /><van-cell
             title="退出登录"
             @click="logout" /></van-cell-group
       ></template>
@@ -319,3 +380,31 @@ onMounted(async () => {
     >
   </div>
 </template>
+<style scoped>
+.home-banners {
+  margin-bottom: 16px;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.home-banners img {
+  width: 100%;
+  height: 170px;
+  object-fit: cover;
+  display: block;
+}
+.product-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.agreement-content {
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.agreement-content :deep(h2) {
+  font-size: 20px;
+}
+.agreement-content :deep(h3) {
+  font-size: 17px;
+}
+</style>

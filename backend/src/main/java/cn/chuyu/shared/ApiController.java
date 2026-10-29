@@ -9,9 +9,9 @@ import cn.chuyu.members.*;
 import cn.chuyu.orders.*;
 import cn.chuyu.reports.*;
 import cn.chuyu.rewards.*;
+import cn.chuyu.system.ManagementService;
 import java.util.*;
 import org.springframework.http.*;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -27,7 +27,7 @@ public class ApiController {
   private final RuleService rules;
   private final SettlementService settlements;
   private final QueryService queries;
-  private final BCryptPasswordEncoder encoder;
+  private final ManagementService management;
 
   public ApiController(
       Store db,
@@ -40,7 +40,7 @@ public class ApiController {
       RuleService rules,
       SettlementService settlements,
       QueryService queries,
-      BCryptPasswordEncoder encoder) {
+      ManagementService management) {
     this.db = db;
     this.commands = commands;
     this.members = members;
@@ -51,7 +51,7 @@ public class ApiController {
     this.rules = rules;
     this.settlements = settlements;
     this.queries = queries;
-    this.encoder = encoder;
+    this.management = management;
   }
 
   @GetMapping("/config")
@@ -67,7 +67,15 @@ public class ApiController {
             "rules",
             rules.current(),
             "roles",
-            Actors.PERMISSIONS,
+            management.rows("roles", true).stream()
+                .collect(
+                    java.util.stream.Collectors.toMap(
+                        r -> text(r, "id"), r -> r.get("permissions"))),
+            "menus",
+            management.rows("menus", false),
+            "roleNames",
+            management.rows("roles", false).stream()
+                .collect(java.util.stream.Collectors.toMap(r -> text(r, "id"), r -> r.get("name"))),
             "today",
             Store.today().toString(),
             "timezone",
@@ -84,7 +92,7 @@ public class ApiController {
     return api(
         map(
             "products",
-            db.list("SELECT * FROM products WHERE active=TRUE ORDER BY id"),
+            db.list("SELECT * FROM products WHERE active=TRUE AND deleted=FALSE ORDER BY id"),
             "shops",
             db.list(
                 "SELECT id,nickname,phone,shop_type FROM member_points WHERE active=TRUE AND"
@@ -96,10 +104,16 @@ public class ApiController {
     require(account.length() >= 4, "请输入完整账户编号或手机号");
     var found =
         db.list(
-            "SELECT id,nickname,phone,grade,shop_type,active FROM member_points WHERE"
-                + " (id=#{p.account} OR phone=#{p.account}) AND id NOT IN ('SYSTEM','RECOVERY') AND"
-                + " active=TRUE ORDER BY sequence_no LIMIT 20",
+            "SELECT"
+                + " id,nickname,phone,grade,shop_type,active,activated,is_main,sequence_no,parent_id"
+                + " FROM member_points WHERE (id=#{p.account} OR phone=#{p.account}) AND id NOT IN"
+                + " ('SYSTEM','RECOVERY') AND active=TRUE ORDER BY sequence_no LIMIT 20",
             map("account", account));
+    if (account.equals(rules.current().recoveryPoint))
+      found =
+          db.list(
+              "SELECT id,nickname,phone,grade,shop_type,active FROM member_points WHERE id=#{p.id}",
+              map("id", account));
     return api(
         found.stream()
             .map(
@@ -115,16 +129,47 @@ public class ApiController {
             .toList());
   }
 
+  @GetMapping("/members/{id}")
+  public Object member(@PathVariable String id) {
+    members.readAccess(id);
+    return api(
+        members.list().stream()
+            .filter(p -> text(p, "id").equals(id))
+            .findFirst()
+            .orElseThrow(() -> new BusinessException(404, "点位不存在")));
+  }
+
   @GetMapping("/orders/{id}")
   public Object order(@PathVariable String id) {
     var o = orders.order(id);
     orders.readAccess(o);
     Map<String, Object> result = new LinkedHashMap<>(o);
+    var productSnapshot = read(text(o, "memberSnapshot"), Map.class);
     result.put(
-        "awards",
+        "product",
+        productSnapshot.get("product") instanceof Map<?, ?>
+            ? productSnapshot.get("product")
+            : productSnapshot);
+    var awards =
         db.list(
             "SELECT * FROM reward_awards WHERE order_id=#{p.id} ORDER BY created_at,id",
-            map("id", id)));
+            map("id", id));
+    if (Actors.member())
+      awards =
+          awards.stream().filter(a -> Actors.owns(members.point(text(a, "recipientId")))).toList();
+    else if (!Actors.has("funds:read")) awards = List.of();
+    else if (!Actors.current().dataScope().equals("ALL"))
+      awards =
+          awards.stream()
+              .filter(a -> Actors.canPoint(members.point(text(a, "recipientId"))))
+              .toList();
+    result.put("awards", awards);
+    if (Actors.member()
+        || !Actors.has("funds:read")
+        || !Actors.current().dataScope().equals("ALL")) {
+      result.remove("memberSnapshot");
+      result.remove("ruleSnapshot");
+    }
     result.put(
         "shipments",
         db.list(
@@ -148,14 +193,19 @@ public class ApiController {
   public Object shipment(@PathVariable String id) {
     var a = db.required("SELECT * FROM fulfilment_applications WHERE id=#{p.id}", map("id", id));
     if (Actors.member()) members.own(text(a, "shopId"));
-    else Actors.require("shipping:read");
+    else {
+      Actors.require("shipping:read");
+      Actors.requirePoint(members.point(text(a, "shopId")));
+    }
     return api(map("application", a, "lines", shipping.lines(id)));
   }
 
   @GetMapping("/network/{id}")
   public Object network(@PathVariable String id, @RequestParam(defaultValue = "1") int page) {
-    if (!Actors.member()) Actors.require("members:read");
-    else {
+    if (!Actors.member()) {
+      Actors.require("members:read");
+      Actors.requirePoint(members.point(id));
+    } else {
       var ps = performance.points();
       Map<String, Map<String, Object>> ix = new HashMap<>();
       ps.forEach(p -> ix.put(text(p, "id"), p));
@@ -165,13 +215,17 @@ public class ApiController {
     }
     require(page >= 1 && page < 100000, "分页参数错误");
     var root = members.point(id);
+    var args = map("id", id, "offset", (page - 1) * 100);
+    String childScope = Actors.member() ? "" : Actors.sqlScope("p", "id", args);
     var children =
         db.list(
             "SELECT id,nickname,phone,parent_id,grade,director_grade,shop_type,active,(SELECT"
                 + " COUNT(*) FROM member_points c WHERE c.parent_id=p.id) child_count FROM"
-                + " member_points p WHERE parent_id=#{p.id} ORDER BY created_at,id LIMIT 100 OFFSET"
+                + " member_points p WHERE parent_id=#{p.id}"
+                + childScope
+                + " ORDER BY created_at,id LIMIT 100 OFFSET"
                 + " #{p.offset}",
-            map("id", id, "offset", (page - 1) * 100));
+            args);
     return api(
         map(
             "root",
@@ -181,11 +235,19 @@ public class ApiController {
                 "nickname",
                 root.get("nickname"),
                 "parentId",
-                root.get("parentId")),
+                root.get("parentId"),
+                "phone",
+                root.get("phone"),
+                "grade",
+                root.get("grade"),
+                "shopType",
+                root.get("shopType")),
             "children",
             children,
             "total",
-            db.count("SELECT COUNT(*) n FROM member_points WHERE parent_id=#{p.id}", map("id", id)),
+            db.count(
+                "SELECT COUNT(*) n FROM member_points p WHERE parent_id=#{p.id}" + childScope,
+                args),
             "page",
             page));
   }
@@ -196,6 +258,11 @@ public class ApiController {
     return api(rules.list());
   }
 
+  @GetMapping("/rules/compare")
+  public Object compareRules(@RequestParam String left, @RequestParam String right) {
+    return api(rules.compare(left, right));
+  }
+
   @GetMapping("/scenarios")
   public Object scenarios(@RequestParam(required = false) String ruleId) {
     Actors.require("rules:read");
@@ -204,7 +271,7 @@ public class ApiController {
 
   @GetMapping("/batches/{id}")
   public Object batch(@PathVariable String id) {
-    Actors.require("funds:read");
+    Actors.requireGlobal("funds:read");
     return api(settlements.detail(id));
   }
 
@@ -218,11 +285,41 @@ public class ApiController {
     return api(queries.reconciliation());
   }
 
+  @GetMapping("/funds/trace/{id}")
+  public Object trace(@PathVariable String id) {
+    if (!Actors.member()) Actors.require("funds:read");
+    var args = map("id", id, "owner", Actors.current().ownerId());
+    String scope =
+        Actors.member() ? " AND m.owner_id=#{p.owner}" : Actors.sqlScope("e", "point_id", args);
+    var entries =
+        db.list(
+            "SELECT e.*,t.kind business_kind,t.origin_id FROM ledger_entries e JOIN"
+                + " ledger_transactions t ON t.id=e.transaction_id JOIN member_points m ON"
+                + " m.id=e.point_id WHERE (t.id=#{p.id} OR t.origin_id=#{p.id})"
+                + scope
+                + " ORDER BY e.created_at,e.id",
+            args);
+    require(!entries.isEmpty(), "没有可查看的关联流水");
+    String awardScope =
+        Actors.member()
+            ? " AND EXISTS(SELECT 1 FROM member_points m WHERE m.id=a.recipient_id AND"
+                + " m.owner_id=#{p.owner})"
+            : Actors.sqlScope("a", "recipient_id", args);
+    var awards =
+        db.list(
+            "SELECT a.* FROM reward_awards a WHERE (a.order_id=#{p.id} OR a.batch_id=#{p.id})"
+                + awardScope
+                + " ORDER BY a.created_at,a.id",
+            args);
+    return api(map("id", id, "entries", entries, "awards", awards));
+  }
+
   @SuppressWarnings("unchecked")
   @GetMapping("/exports/{resource}")
   public ResponseEntity<org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody>
       export(@PathVariable String resource, @RequestParam Map<String, String> q) {
     Actors.require("reports:export");
+    db.audit("EXPORT_REQUEST", resource, null, q, "导出筛选结果");
     Map<String, String> filters = new HashMap<>(q);
     filters.put("size", "5000");
     filters.put("page", "1");
@@ -298,10 +395,11 @@ public class ApiController {
                   case "funds-adjustments" -> funds.adjust(b);
                   case "stock-transfers" -> funds.stockTransfer(b);
                   case "shipments" -> shipping.apply(b);
+                  case "shipping-quotes" -> shipping.quote(b);
                   case "previews" -> settlements.preview(b);
                   case "rules" -> rules.draft(b);
                   case "products" -> product(null, b);
-                  case "system-users" -> user(null, b);
+                  case "system-users" -> management.user(null, b);
                   default -> throw new BusinessException(404, "操作不存在");
                 }));
   }
@@ -326,8 +424,12 @@ public class ApiController {
                   case "orders:cancel" -> orders.cancel(id, b);
                   case "members:update" -> members.update(id, b);
                   case "members:reset-password" -> members.resetPassword(id, text(b, "reason"));
+                  case "members:activate-empty" -> members.activateEmpty(id, b);
+                  case "cancellations:restore" -> members.restore(id, b);
                   case "withdrawals:review" -> funds.reviewWithdrawal(id, b);
                   case "topups:review" -> funds.reviewTopup(id, b);
+                  case "topups:delete" -> funds.archiveTopup(id, false, b);
+                  case "topups:restore" -> funds.archiveTopup(id, true, b);
                   case "shipments:review" -> shipping.review(id, b);
                   case "shipments:ship" -> shipping.ship(id, b);
                   case "rules:update" -> rules.save(id, b);
@@ -336,13 +438,17 @@ public class ApiController {
                   case "batches:post" -> settlements.post(id);
                   case "settings:update" -> setting(b);
                   case "products:update" -> product(id, b);
-                  case "system-users:update" -> user(id, b);
+                  case "system-users:update" -> management.user(id, b);
+                  case "system-users:reset-password" -> management.resetUser(id, false, b);
+                  case "system-users:unlock" -> management.resetUser(id, true, b);
+                  case "system-users:delete" -> management.disableUser(id, b);
+                  case "products:delete" -> deleteProduct(id, b);
                   default -> throw new BusinessException(404, "操作不存在");
                 }));
   }
 
   private Map<String, Object> setting(Map<String, Object> b) {
-    Actors.require("rules:write");
+    Actors.requireGlobal("rules:write");
     require(!text(b, "reason").isBlank(), "请填写开关变更原因");
     var before = rules.settings();
     db.exec(
@@ -353,15 +459,26 @@ public class ApiController {
   }
 
   private Map<String, Object> product(String id, Map<String, Object> b) {
-    Actors.require("rules:write");
+    Actors.requireGlobal("rules:write");
     String name = text(b, "name");
     require(!name.isBlank(), "请输入商品名称");
+    var before =
+        id == null ? null : db.required("SELECT * FROM products WHERE id=#{p.id}", map("id", id));
+    String channel = b.containsKey("channel") ? text(b, "channel") : "初语山言";
+    String types = b.containsKey("purchaseTypes") ? text(b, "purchaseTypes") : "NEW,FIRST,REPEAT";
+    require(
+        !channel.isBlank()
+            && !types.isBlank()
+            && Arrays.stream(types.split(",")).allMatch(Set.of("NEW", "FIRST", "REPEAT")::contains),
+        "请选择渠道和购买类型");
+    ManagementService.validateImage(text(b, "imageUrl"));
     String diff = write(b.getOrDefault("differential", List.of(1, 2, 3, 4, 5)));
     var values = read(diff, List.class);
     require(values.size() == 5, "请配置二至六星的五档固定级差");
     java.math.BigDecimal last = ZERO;
     for (Object v : values) {
       require(d(v).compareTo(last) >= 0, "按瓶级差必须递增");
+      require(d(v).scale() <= 2, "固定级差最多两位小数");
       last = d(v);
     }
     var p =
@@ -389,7 +506,15 @@ public class ApiController {
             "weight",
             d(b.get("weightKg")),
             "active",
-            b.getOrDefault("active", true));
+            b.getOrDefault("active", true),
+            "channel",
+            channel,
+            "types",
+            types,
+            "image",
+            text(b, "imageUrl"),
+            "specification",
+            text(b, "specification"));
     require(
         integer(p.get("limit1")) >= 1
             && integer(p.get("limit2")) >= 1
@@ -401,67 +526,24 @@ public class ApiController {
     if (id == null)
       db.exec(
           "INSERT INTO"
-              + " products(id,name,first_price,repeat_one,repeat_other,limit_one,limit_other,subsidy_one,subsidy_rate,differential_json,weight_kg,active)"
-              + " VALUES(#{p.id},#{p.name},#{p.first},#{p.one},#{p.other},#{p.limit1},#{p.limit2},#{p.subsidy1},#{p.rate},#{p.diff},#{p.weight},#{p.active})",
+              + " products(id,name,first_price,repeat_one,repeat_other,limit_one,limit_other,subsidy_one,subsidy_rate,differential_json,weight_kg,active,channel,purchase_types,image_url,specification)"
+              + " VALUES(#{p.id},#{p.name},#{p.first},#{p.one},#{p.other},#{p.limit1},#{p.limit2},#{p.subsidy1},#{p.rate},#{p.diff},#{p.weight},#{p.active},#{p.channel},#{p.types},#{p.image},#{p.specification})",
           p);
     else
       db.exec(
           "UPDATE products SET"
-              + " name=#{p.name},first_price=#{p.first},repeat_one=#{p.one},repeat_other=#{p.other},limit_one=#{p.limit1},limit_other=#{p.limit2},subsidy_one=#{p.subsidy1},subsidy_rate=#{p.rate},differential_json=#{p.diff},weight_kg=#{p.weight},active=#{p.active}"
+              + " name=#{p.name},first_price=#{p.first},repeat_one=#{p.one},repeat_other=#{p.other},limit_one=#{p.limit1},limit_other=#{p.limit2},subsidy_one=#{p.subsidy1},subsidy_rate=#{p.rate},differential_json=#{p.diff},weight_kg=#{p.weight},active=#{p.active},channel=#{p.channel},purchase_types=#{p.types},image_url=#{p.image},specification=#{p.specification}"
               + " WHERE id=#{p.id}",
           p);
-    db.audit("PRODUCT_EDIT", text(p, "id"), null, p, text(b, "reason"));
+    db.audit("PRODUCT_EDIT", text(p, "id"), before, p, text(b, "reason"));
     return map("id", p.get("id"));
   }
 
-  private Map<String, Object> user(String id, Map<String, Object> b) {
-    Actors.require("system:write");
-    String role = text(b, "role");
-    require(Actors.PERMISSIONS.containsKey(role) && !role.equals("MEMBER"), "请选择后台角色");
-    if (id == null) {
-      String username = text(b, "username"), password = text(b, "password");
-      require(
-          username.matches("[A-Za-z0-9_]{4,32}")
-              && password.length() >= 10
-              && password.length() <= 72,
-          "账号需4至32位字母数字，新密码至少10位");
-      id = id();
-      db.exec(
-          "INSERT INTO"
-              + " app_users(id,username,display_name,phone,password_hash,payment_hash,role,must_change_password)"
-              + " VALUES(#{p.id},#{p.username},#{p.name},#{p.phone},#{p.password},#{p.payment},#{p.role},TRUE)",
-          map(
-              "id",
-              id,
-              "username",
-              username,
-              "name",
-              text(b, "displayName"),
-              "phone",
-              text(b, "phone"),
-              "password",
-              encoder.encode(password),
-              "payment",
-              encoder.encode("123456"),
-              "role",
-              role));
-    } else {
-      require(!id.equals(Actors.current().id()), "请由其他管理员修改当前账号权限");
-      db.exec(
-          "UPDATE app_users SET role=#{p.role},active=#{p.active},department=#{p.department} WHERE"
-              + " id=#{p.id}",
-          map(
-              "id",
-              id,
-              "role",
-              role,
-              "active",
-              bool(b.get("active")),
-              "department",
-              text(b, "department")));
-      db.exec("DELETE FROM auth_sessions WHERE user_id=#{p.id}", map("id", id));
-    }
-    db.audit("SYSTEM_USER_EDIT", id, null, map("role", role), text(b, "reason"));
+  private Map<String, Object> deleteProduct(String id, Map<String, Object> b) {
+    Actors.requireGlobal("rules:write");
+    var before = db.required("SELECT * FROM products WHERE id=#{p.id}", map("id", id));
+    db.exec("UPDATE products SET active=FALSE,deleted=TRUE WHERE id=#{p.id}", map("id", id));
+    db.audit("PRODUCT_DELETE", id, before, null, text(b, "reason"));
     return map("id", id);
   }
 }

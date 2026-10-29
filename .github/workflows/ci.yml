@@ -51,4 +51,5 @@ jobs:
           path: |
             backend/target/surefire-reports/
             docs/verification/api-acceptance.json
+            docs/verification/requirements-api.json
             .runtime/backend.log

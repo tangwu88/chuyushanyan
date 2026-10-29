@@ -30,13 +30,15 @@ public class SecurityConfig {
   }
 
   @Bean
-  SecurityFilterChain security(HttpSecurity http, Store store) throws Exception {
+  SecurityFilterChain security(HttpSecurity http, Store store, AccessPolicy policy)
+      throws Exception {
     var filter =
         new OncePerRequestFilter() {
           @Override
           protected void doFilterInternal(
               HttpServletRequest req, HttpServletResponse res, FilterChain chain)
               throws ServletException, IOException {
+            req.setAttribute("chuyu.started", System.nanoTime());
             String token = req.getHeader("Authorization");
             if (token != null && token.startsWith("Bearer ")) {
               var u =
@@ -45,20 +47,24 @@ public class SecurityConfig {
                           + " s.token_hash=#{p.hash} AND s.expires_at>CURRENT_TIMESTAMP AND"
                           + " u.active=TRUE",
                       map("hash", hash(token.substring(7))));
-              if (u != null) {
-                var actor =
-                    new Actors.Actor(
-                        u.get("id").toString(),
-                        u.get("username").toString(),
-                        u.get("displayName").toString(),
-                        u.get("role").toString(),
-                        text(u, "ownerId"),
-                        bool(u.get("mustChangePassword")));
+              if (u != null
+                  && (!text(u, "role").equals("MEMBER")
+                      || store.count(
+                              "SELECT COUNT(*) FROM member_points WHERE owner_id=#{p.owner} AND"
+                                  + " active=TRUE",
+                              map("owner", u.get("ownerId")))
+                          > 0)) {
+                var actor = policy.actor(u);
+                if (actor.permissions().isEmpty()) {
+                  chain.doFilter(req, res);
+                  return;
+                }
                 org.springframework.security.core.context.SecurityContextHolder.getContext()
                     .setAuthentication(
                         new UsernamePasswordAuthenticationToken(actor, null, java.util.List.of()));
                 if (actor.mustChangePassword()
-                    && !req.getRequestURI().matches("/api/v1/auth/(me|password|logout)")) {
+                    && !req.getRequestURI()
+                        .matches("/api/v1/(auth/(me|password|logout)|content)")) {
                   res.setStatus(403);
                   res.setContentType("application/json;charset=UTF-8");
                   res.getWriter()
@@ -77,7 +83,8 @@ public class SecurityConfig {
             a ->
                 a.dispatcherTypeMatchers(jakarta.servlet.DispatcherType.ASYNC)
                     .permitAll()
-                    .requestMatchers("/api/v1/auth/login", "/actuator/health", "/error")
+                    .requestMatchers(
+                        "/api/v1/auth/login", "/api/v1/content", "/actuator/health", "/error")
                     .permitAll()
                     .anyRequest()
                     .authenticated())

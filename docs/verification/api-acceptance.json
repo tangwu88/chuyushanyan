@@ -1,7 +1,7 @@
 {
-  "verifiedAt": "2026-10-29T16:43:12.548Z",
+  "verifiedAt": "2026-10-29T19:24:22.586Z",
   "database": "MySQL 8.4.13",
-  "checks": 39,
+  "checks": 40,
   "passed": [
     "未登录请求被拒绝",
     "销售级差1490元独立样例603.45",
@@ -13,6 +13,7 @@
     "同一请求编号不能用于不同内容",
     "已付款待激活资金被预留",
     "监察角色不能激活订单",
+    "会员订单详情不暴露其他会员奖金或关系快照",
     "激活后产生真实销售奖并保存版本",
     "会员仅能看到本人点位",
     "积分转账重复提交只入账一次",
@@ -44,12 +45,16 @@
     "MySQL全部余额和流水平衡"
   ],
   "examples": {
-    "member": "CY416E4D9ACE",
-    "orders": ["OD3E691852053E4489", "OD721E3986BDF448CD", "OD39705111CFAA475E"],
-    "shipment": "SH6B66C219785B41F4",
-    "withdrawal": "87d8a93356c74137bb3142f3f875970b",
-    "batch": "48c3131c2b8d4618945fe4bda9cfdeeb",
-    "rule": "R1C2015C42A"
+    "member": "CY78D03DA873",
+    "orders": [
+      "OD3B92733A255A48B3",
+      "OD47AC88C0B16949B3",
+      "ODD8CFA77235F145AB"
+    ],
+    "shipment": "SH8E5E1E55281E414F",
+    "withdrawal": "f513a642d66a4ba7a25f17ac745c78df",
+    "batch": "e20e265908404dd8bbf3d521d32aaf00",
+    "rule": "R92D283FF16"
   },
   "reconciliation": {
     "balanced": true,

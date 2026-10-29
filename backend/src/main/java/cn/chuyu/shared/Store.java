@@ -35,7 +35,9 @@ public class Store {
                     }
                     out.put(
                         key.toString(),
-                        v instanceof Timestamp t ? t.toLocalDateTime().toString() : v);
+                        v instanceof Timestamp t
+                            ? t.toLocalDateTime().toString()
+                            : v instanceof java.sql.Date date ? date.toLocalDate().toString() : v);
                   });
               return out;
             })
@@ -66,9 +68,20 @@ public class Store {
   }
 
   public void audit(String action, String target, Object before, Object after, String reason) {
+    var attributes =
+        org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+    var request =
+        attributes instanceof org.springframework.web.context.request.ServletRequestAttributes a
+            ? a.getRequest()
+            : null;
+    long elapsed =
+        request != null && request.getAttribute("chuyu.started") instanceof Long start
+            ? Math.max(0, (System.nanoTime() - start) / 1000000)
+            : 0;
     exec(
-        "INSERT INTO audit_logs(id,actor_id,action,target_id,before_json,after_json,reason)"
-            + " VALUES(#{p.id},#{p.actor},#{p.action},#{p.target},#{p.before},#{p.after},#{p.reason})",
+        "INSERT INTO"
+            + " audit_logs(id,actor_id,action,target_id,before_json,after_json,reason,ip,request_method,request_url,result_status,elapsed_ms)"
+            + " VALUES(#{p.id},#{p.actor},#{p.action},#{p.target},#{p.before},#{p.after},#{p.reason},#{p.ip},#{p.method},#{p.url},#{p.status},#{p.elapsed})",
         map(
             "id",
             id(),
@@ -79,11 +92,41 @@ public class Store {
             "target",
             target,
             "before",
-            write(before),
+            write(redact(before)),
             "after",
-            write(after),
+            write(redact(after)),
             "reason",
-            reason));
+            reason,
+            "ip",
+            request == null ? "" : request.getRemoteAddr(),
+            "method",
+            request == null ? "" : request.getMethod(),
+            "url",
+            request == null ? "" : request.getRequestURI(),
+            "status",
+            action.equals("REQUEST_FAILED") ? "ERROR" : "SUCCESS",
+            "elapsed",
+            elapsed));
+  }
+
+  public static Object redact(Object value) {
+    if (value instanceof Map<?, ?> values) {
+      Map<String, Object> out = new LinkedHashMap<>();
+      values.forEach(
+          (key, v) -> {
+            String name = key.toString();
+            out.put(
+                name,
+                name.toLowerCase(Locale.ROOT)
+                        .matches(
+                            ".*(password|passwordhash|paymenthash|token|secret).*|bankaccount|identitynumber")
+                    ? "***"
+                    : redact(v));
+          });
+      return out;
+    }
+    if (value instanceof Collection<?> values) return values.stream().map(Store::redact).toList();
+    return value;
   }
 
   public static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");

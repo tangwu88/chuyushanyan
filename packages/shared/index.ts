@@ -13,6 +13,8 @@ export interface User {
   ownerId: string;
   mustChangePassword: boolean;
   permissions: string[];
+  department?: string;
+  dataScope?: string;
 }
 export class ApiClient {
   private pending = new Map<string, string>();
@@ -104,6 +106,13 @@ export function fromCents(value: bigint): string {
   const n = value < 0n ? -value : value;
   return (value < 0n ? '-' : '') + String(n / 100n) + '.' + String(n % 100n).padStart(2, '0');
 }
+export function proportionalMoney(amount: unknown, rate: unknown): string {
+  const parts = /^(\d+)(?:\.(\d+))?$/.exec(String(rate || '0'));
+  if (!parts) return '0.00';
+  const precision = 10n ** BigInt((parts[2] || '').length),
+    factor = BigInt(parts[1] + (parts[2] || ''));
+  return fromCents((cents(amount) * factor + precision / 2n) / precision);
+}
 export const availableBalance = (wallet: Row | undefined) =>
   fromCents(cents(wallet?.balance) - cents(wallet?.frozen));
 export function money(value: any): string {
@@ -163,6 +172,13 @@ export const labels: Record<string, string> = {
   STOCK_TRANSFER: '店铺转货',
   ORDER_CREATE: '创建订单',
   ORDER_PAY_DEMO: '演示支付',
+  ORDER_PAYMENT: '订单付款',
+  ORDER_RESERVATION: '订单额度预留',
+  MANUAL_ADJUST: '人工资金调整',
+  TOPUP: '充值到账',
+  SETTLEMENT: '奖金结算入账',
+  DEMO_OPENING: '期初积分',
+  WITHDRAW_HOLD: '提现冻结',
   ORDER_ACTIVATE: '激活订单',
   ORDER_CANCEL: '撤销订单',
   SHIP_APPLY: '申请发货',
@@ -174,6 +190,31 @@ export const labels: Record<string, string> = {
   PRODUCT_EDIT: '商品调整',
   SYSTEM_USER_EDIT: '用户权限调整',
   DEMO_SEED: '初始化数据',
+  GRADE_MANUAL: '人工调整会员等级',
+  GRADE_SYNC: '同步升级',
+  DIRECTOR_MANUAL: '人工调整董事等级',
+  REFERRAL_CHANGE: '更改推荐人',
+  PHONE_MERGE: '手机号归并',
+  MEMBER_RESTORE: '注销找回',
+  EMPTY_ACTIVATE: '空点激活',
+  CONFIG_EDIT: '修改配置',
+  CONFIG_DELETE: '删除配置',
+  ACCOUNT_UNLOCK: '账号解锁',
+  PRODUCT_DELETE: '删除商品',
+  EXPORT_REQUEST: '导出数据',
+  REQUEST_FAILED: '操作失败',
+  TOPUP_DELETE: '删除充值申请',
+  TOPUP_RESTORE: '找回充值申请',
+  UPGRADE_REQUEST: '申请同步升级',
+  UPGRADE_REVIEW: '审批同步升级',
+  DATA_ARCHIVE: '数据归档',
+  LOG_CLEAR: '清理日志',
+  SYSTEM_USER_IMPORT: '导入后台用户',
+  SUCCESS: '成功',
+  FAILED: '失败',
+  ALL: '全部数据',
+  DEPARTMENT: '本部门数据',
+  SELF: '本人创建的数据',
   DONE: '已完成',
   RUNNING: '执行中',
   ERROR: '失败',
@@ -182,7 +223,7 @@ export const labels: Record<string, string> = {
   REPEAT: '复购',
   REWARD: '奖励积分',
   RECHARGE: '充值积分',
-  NONE: '普通会员',
+  NONE: '非店铺',
   SMALL: '小店',
   BIG: '大店',
   UNPAID: '待支付',
@@ -210,6 +251,12 @@ export const labels: Record<string, string> = {
   DAILY: '日结',
   MONTHLY: '月结 · 计划与身份',
   MONTHLY_REPEAT: '月结 · 七星复购',
+  MEMBERS: '会员资格复核',
+  UPGRADES: '同步升级核验',
+  PERFORMANCE: '业绩快照',
+  RANKING: '会员排行快照',
+  ARCHIVE: '历史数据归档',
+  RECONCILIATION: '资金对账',
   REPORT: '报单业绩',
   TOTAL: '总业绩',
   SALES: '销售级差奖',
@@ -238,9 +285,19 @@ export const labels: Record<string, string> = {
   AUDITOR: '监察',
   VIEWER: '普通角色',
   MEMBER: '会员',
+  SYSTEM_USER_DISABLE: '停用后台账号',
 };
 for (let i = 1; i <= 6; i++) labels['DIRECTOR_' + i] = i + '星董事分红';
 export const label = (v: any) => labels[String(v)] || String(v ?? '—');
+export const businessText = (v: any) =>
+  String(v ?? '—').replace(/^([A-Z][A-Z0-9_]*)(?=\s|$)/, (code) => labels[code] || code);
+export function configureLabels(config: Row) {
+  Object.entries(config.roleNames || {}).forEach(([code, name]) => (labels[code] = String(name)));
+  Object.entries(config.rules?.identities || {}).forEach(([code, value]) => {
+    const row = value as Row;
+    labels['IDENTITY_' + code] = row.displayMark || row.name;
+  });
+}
 export const orderStatus = (o: Row) =>
   o.cancelled
     ? 'CANCELLED'
@@ -255,4 +312,45 @@ export function query(values: Row) {
     if (v !== '' && v !== undefined && v !== null) q.set(k, String(v));
   });
   return q.toString();
+}
+
+export function safeHtml(value: unknown): string {
+  const doc = new DOMParser().parseFromString(String(value || ''), 'text/html');
+  const allowed = new Set([
+    'P',
+    'BR',
+    'B',
+    'STRONG',
+    'I',
+    'EM',
+    'U',
+    'H2',
+    'H3',
+    'OL',
+    'UL',
+    'LI',
+    'A',
+    'BLOCKQUOTE',
+  ]);
+  function clean(parent: Element) {
+    for (const child of Array.from(parent.children)) {
+      if (['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT'].includes(child.tagName)) {
+        child.remove();
+        continue;
+      }
+      clean(child);
+      if (!allowed.has(child.tagName)) {
+        child.replaceWith(...Array.from(child.childNodes));
+        continue;
+      }
+      const href = child.tagName === 'A' ? child.getAttribute('href') || '' : '';
+      for (const attr of Array.from(child.attributes)) child.removeAttribute(attr.name);
+      if (/^https?:\/\//i.test(href)) {
+        child.setAttribute('href', href);
+        child.setAttribute('rel', 'noopener noreferrer');
+      }
+    }
+  }
+  clean(doc.body);
+  return doc.body.innerHTML;
 }

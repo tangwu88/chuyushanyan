@@ -26,6 +26,8 @@ public class Rules {
   public BigDecimal repeatTopThreshold = d("18000000"), repeatTopRate = d("0.005");
   public boolean repeatTopLineBonus = true;
   public String recoveryPoint = "RECOVERY";
+  public String newMemberGradeVersion = "v2";
+  public List<Integer> directorMarketCounts = new ArrayList<>(List.of(2, 3, 3, 3, 3, 3));
   public List<BigDecimal> salesRates =
       new ArrayList<>(
           List.of(d(".05"), d(".10"), d(".20"), d(".25"), d(".30"), d(".35"), d(".40"), d(".45")));
@@ -50,7 +52,54 @@ public class Rules {
   public record Grade(int grade, BigDecimal team, BigDecimal small) {}
 
   public record Identity(
-      String name, String basis, String cycle, int minimumGrade, BigDecimal rate, String source) {}
+      String name,
+      String basis,
+      String cycle,
+      int minimumGrade,
+      BigDecimal rate,
+      String source,
+      String mode,
+      BigDecimal diffRatio,
+      BigDecimal totalCoefficient,
+      BigDecimal realCoefficient,
+      String displayMark,
+      Boolean enabled) {
+    public Identity {
+      mode = mode == null || mode.isBlank() ? "RATE" : mode;
+      diffRatio = diffRatio == null ? ZERO : diffRatio;
+      totalCoefficient = totalCoefficient == null ? BigDecimal.ONE : totalCoefficient;
+      realCoefficient = realCoefficient == null ? BigDecimal.ONE : realCoefficient;
+      displayMark = displayMark == null ? "" : displayMark;
+      enabled = enabled == null ? true : enabled;
+    }
+
+    public Identity(
+        String name, String basis, String cycle, int minimumGrade, BigDecimal rate, String source) {
+      this(
+          name,
+          basis,
+          cycle,
+          minimumGrade,
+          rate,
+          source,
+          "RATE",
+          ZERO,
+          BigDecimal.ONE,
+          BigDecimal.ONE,
+          "",
+          true);
+    }
+
+    public BigDecimal effectiveRate(Rules rules, BigDecimal basis) {
+      return mode.equals("RATE")
+          ? rate
+          : max0(
+              diffRatio
+                  .multiply(totalCoefficient)
+                  .add(rules.repeatTopRate)
+                  .subtract(rules.repeatRate(basis).multiply(realCoefficient)));
+    }
+  }
 
   public Rules() {
     String[] bounds = {
@@ -103,8 +152,21 @@ public class Rules {
   }
 
   public void validate() {
+    require(
+        salesRates != null
+            && directorRates != null
+            && directorThresholds != null
+            && directorCounts != null
+            && directorMarketCounts != null
+            && repeatTiers != null
+            && gradeVersions != null
+            && identities != null
+            && shippingThreshold != null
+            && smallShopThreshold != null
+            && repeatTopThreshold != null,
+        "规则参数不完整");
     for (BigDecimal rate :
-        List.of(
+        Arrays.asList(
             managementFee,
             withdrawalFee,
             tax,
@@ -122,7 +184,7 @@ public class Rules {
     require(withdrawalFee.add(tax).compareTo(BigDecimal.ONE) < 0, "提现手续费与税率之和必须小于100%");
     require(
         maxPoints >= 1
-            && maxPoints <= 1000
+            && maxPoints <= 13
             && directReferrals > 0
             && peerGenerations >= 0
             && peerGenerations <= 10,
@@ -132,12 +194,20 @@ public class Rules {
             && smallShopThreshold.signum() >= 0
             && repeatTopThreshold.signum() >= 0,
         "金额门槛不能为负");
+    require(smallShopMinimumGrade >= 0 && smallShopMinimumGrade <= 7, "小店分红等级需为0至7");
     require(
         salesRates.size() == 8
             && directorRates.size() == 6
             && directorThresholds.size() == 5
             && directorCounts.size() == 5,
         "等级参数数量不完整");
+    require(
+        salesRates.stream().allMatch(Objects::nonNull)
+            && directorRates.stream().allMatch(Objects::nonNull)
+            && directorThresholds.stream().allMatch(Objects::nonNull)
+            && directorCounts.stream().allMatch(Objects::nonNull)
+            && directorMarketCounts.stream().allMatch(Objects::nonNull),
+        "等级参数不能为空");
     BigDecimal previous = ZERO;
     for (BigDecimal r : salesRates) {
       require(r.compareTo(previous) >= 0 && r.compareTo(BigDecimal.ONE) <= 0, "销售奖比例必须递增");
@@ -155,6 +225,7 @@ public class Rules {
     BigDecimal end = ZERO, lastRate = ZERO;
     for (int i = 0; i < repeatTiers.size(); i++) {
       Tier t = repeatTiers.get(i);
+      require(t != null && t.min() != null && t.rate() != null, "复购档位参数不完整");
       require(t.min().compareTo(end) == 0, "档位必须从0开始连续，不能重叠或留空");
       require(
           t.rate().compareTo(lastRate) >= 0 && t.rate().compareTo(BigDecimal.ONE) <= 0,
@@ -167,14 +238,28 @@ public class Rules {
       lastRate = t.rate();
     }
     for (String v : List.of("v1", "v2")) require(gradeVersions.containsKey(v), "缺少等级版本 " + v);
+    require(gradeVersions.containsKey(newMemberGradeVersion), "新会员等级版本不存在");
+    require(
+        directorMarketCounts.size() == 6
+            && directorMarketCounts.stream().allMatch(n -> n >= 1 && n <= 100),
+        "董事晋升市场数量错误");
     for (var grades : gradeVersions.values()) {
-      require(grades.size() == 5, "需配置三星至七星门槛");
-      for (int i = 0; i < 5; i++)
+      require(grades != null && grades.size() == 5, "需配置三星至七星门槛");
+      for (int i = 0; i < 5; i++) {
+        require(
+            grades.get(i) != null && grades.get(i).team() != null && grades.get(i).small() != null,
+            "等级门槛参数不完整");
         require(
             grades.get(i).grade() == i + 3
                 && grades.get(i).team().signum() >= 0
                 && grades.get(i).small().signum() >= 0,
             "等级门槛错误");
+        if (i > 0)
+          require(
+              grades.get(i).team().compareTo(grades.get(i - 1).team()) >= 0
+                  && grades.get(i).small().compareTo(grades.get(i - 1).small()) >= 0,
+              "等级业绩门槛必须递增");
+      }
     }
     require(
         identities
@@ -184,21 +269,48 @@ public class Rules {
         "八类身份配置不完整");
     for (Identity i : identities.values())
       require(
-          Set.of("REPORT", "REPEAT", "TOTAL").contains(i.basis())
+          i != null
+              && i.basis() != null
+              && i.cycle() != null
+              && i.rate() != null
+              && Set.of("REPORT", "REPEAT", "TOTAL").contains(i.basis())
               && Set.of("DAILY", "MONTHLY").contains(i.cycle())
               && i.rate().signum() >= 0
               && i.rate().compareTo(BigDecimal.ONE) <= 0
               && i.minimumGrade() >= 0
               && i.minimumGrade() <= 7,
           "特殊身份参数错误");
+    for (var entry : identities.entrySet()) {
+      Identity i = entry.getValue();
+      require(
+          entry.getKey() != null
+              && entry.getKey().matches("[A-Z][A-Z0-9_]{0,31}")
+              && i.name() != null
+              && !i.name().isBlank()
+              && Set.of("RATE", "RESIDUAL").contains(i.mode()),
+          "身份编号、名称或计算方式错误");
+      require(
+          i.diffRatio().signum() >= 0
+              && i.diffRatio().compareTo(BigDecimal.ONE) <= 0
+              && i.totalCoefficient().signum() >= 0
+              && i.realCoefficient().signum() >= 0
+              && i.diffRatio()
+                      .multiply(i.totalCoefficient())
+                      .add(repeatTopRate)
+                      .compareTo(BigDecimal.ONE)
+                  <= 0,
+          "动态级差与系数范围错误");
+    }
     Identity a = identities.get("A");
     require(
         a.rate().compareTo(plan2Rate) == 0
+            && a.mode().equals("RATE")
             && a.basis().equals("REPEAT")
             && a.cycle().equals("MONTHLY")
             && a.minimumGrade() == 6,
         "A店与计划2共用月结复购参数，比例需保持一致");
-    require(Set.of("DAILY", "MONTHLY").contains(smallShopCycle), "小店结算周期错误");
+    require(
+        smallShopCycle != null && Set.of("DAILY", "MONTHLY").contains(smallShopCycle), "小店结算周期错误");
   }
 
   public BigDecimal repeatRate(BigDecimal amount) {

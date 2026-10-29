@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import { ElMessage } from 'element-plus';
-import { api, state, hydrate } from '../state';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { api, state, globalCan, hydrate } from '../state';
 import { money, grade, label, type Row, orderStatus } from '@chuyu/shared';
+import MemberPicker from './MemberPicker.vue';
+import NetworkView from './NetworkView.vue';
 const emit = defineEmits<{ updated: [] }>();
 const visible = ref(false),
   kind = ref(''),
@@ -12,6 +14,15 @@ const visible = ref(false),
   quote = ref<Row | null>(null),
   eligible = ref<Row[]>([]),
   selected = ref<string[]>([]);
+const eligiblePage = ref(1),
+  eligibleTotal = ref(0),
+  shippingQuote = ref<Row | null>(null),
+  detailError = ref(''),
+  departments = ref<Row[]>([]),
+  roles = ref<Row[]>([]),
+  posts = ref<Row[]>([]),
+  initialPhone = ref(''),
+  initialActive = ref(true);
 const names: Record<string, string> = {
   member: '新增会员点位',
   editMember: '会员资料与独立调整',
@@ -25,14 +36,23 @@ const names: Record<string, string> = {
   product: '商品配置',
   user: '新增后台用户',
   network: '推荐关系网络',
+  memberDetail: '会员详情',
+  shipmentDetail: '发货明细',
+  stock: '店铺转货',
+  sync: '发起同步升级',
 };
 const title = computed(() => names[kind.value] || '业务操作');
 async function open(type: string, row: Row = {}) {
   kind.value = type;
   form.value = { ...row };
+  initialPhone.value = row.phone || '';
+  initialActive.value = row.active !== false;
   detail.value = {};
   quote.value = null;
   selected.value = [];
+  detailError.value = '';
+  shippingQuote.value = null;
+  eligiblePage.value = 1;
   if (type === 'member')
     form.value = {
       nickname: '',
@@ -40,6 +60,12 @@ async function open(type: string, row: Row = {}) {
       parentId: 'CY1001',
       subPoint: false,
       emptyPoint: false,
+      grade: 0,
+      directorGrade: 0,
+      manualOwn: '0',
+      manualTeam: '0',
+      manualSmall: '0',
+      ...row,
     };
   if (type === 'editMember')
     form.value = {
@@ -47,6 +73,7 @@ async function open(type: string, row: Row = {}) {
       reason: '',
       fixedPlan1: row.fixedPlan1 ?? '',
       fixedPlan2: row.fixedPlan2 ?? '',
+      salesRateOverride: row.salesRateOverride ?? '',
     };
   if (type === 'order')
     form.value = {
@@ -98,6 +125,10 @@ async function open(type: string, row: Row = {}) {
       subsidyRate: '0.05',
       weightKg: '0.5',
       active: true,
+      channel: '初语山言',
+      purchaseTypes: 'NEW,FIRST,REPEAT',
+      imageUrl: '',
+      specification: '瓶',
       ...row,
       differential: row.differentialJson ? JSON.parse(row.differentialJson) : [1, 2, 3, 4, 5],
     };
@@ -109,22 +140,96 @@ async function open(type: string, row: Row = {}) {
       role: 'OPERATOR',
       password: '',
       reason: '',
+      department: '初语山言',
+      postCode: '',
+      email: '',
+      gender: 'UNKNOWN',
+      active: true,
+      ...row,
     };
-  visible.value = true;
-  if (type === 'detail') detail.value = await api.get('/orders/' + row.id);
-  if (type === 'batch') detail.value = await api.get('/batches/' + row.id);
-  if (type === 'network') detail.value = await api.get('/network/' + row.id);
-}
-async function loadEligible() {
-  eligible.value = (
-    await api.get('/lists/orders?status=ACTIVE&size=200&shopId=' + form.value.shopId)
-  ).items;
-  for (const row of eligible.value) {
-    const d = await api.get('/orders/' + row.id);
-    row.availableQuantity = d.availableQuantity;
-    row.shipQuantity = d.availableQuantity;
+  if (type === 'stock')
+    form.value = {
+      fromId: state.catalog.shops[0]?.id || '',
+      toId: state.catalog.shops[1]?.id || '',
+      amount: '',
+    };
+  if (type === 'sync') {
+    const source = state.points.find((p) => p.parentId) || state.points[0] || {};
+    form.value = {
+      fromPoint: source.id || '',
+      targetPoint: source.parentId || '',
+      expectedGrade: 1,
+      reason: '',
+    };
   }
-  selected.value = [];
+  visible.value = true;
+  try {
+    if (type === 'detail') detail.value = await api.get('/orders/' + row.id);
+    if (type === 'batch') detail.value = await api.get('/batches/' + row.id);
+    if (type === 'memberDetail') detail.value = await api.get('/members/' + row.id);
+    if (type === 'shipmentDetail') detail.value = await api.get('/shipments/' + row.id);
+    if (type === 'user') {
+      departments.value = await api.get('/management/departments');
+      roles.value = await api.get('/management/roles');
+      posts.value = await api.get('/management/posts');
+    }
+    if (type === 'editMember' && globalCan('system:write'))
+      departments.value = await api.get('/management/departments');
+  } catch (e) {
+    detailError.value = (e as Error).message;
+  }
+}
+async function loadEligible(reset = true) {
+  try {
+    if (reset) {
+      eligiblePage.value = 1;
+      selected.value = [];
+      eligible.value = [];
+    }
+    const result = await api.get(
+      '/lists/orders?available=true&includeCancelled=true&size=100&page=' +
+        eligiblePage.value +
+        '&shopId=' +
+        form.value.shopId,
+    );
+    result.items.forEach((row: Row) => (row.shipQuantity = row.availableQuantity));
+    eligible.value = reset ? result.items : [...eligible.value, ...result.items];
+    eligibleTotal.value = result.total;
+    shippingQuote.value = null;
+    return true;
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+    return false;
+  }
+}
+async function selectAll() {
+  busy.value = true;
+  try {
+    while (eligible.value.length < eligibleTotal.value) {
+      eligiblePage.value++;
+      if (!(await loadEligible(false))) return;
+    }
+    selected.value = eligible.value
+      .filter((o) => !o.cancelled && o.availableQuantity > 0 && !!o.pickup === !!form.value.pickup)
+      .map((o) => o.id);
+  } finally {
+    busy.value = false;
+  }
+}
+async function priceShipping() {
+  busy.value = true;
+  try {
+    shippingQuote.value = await api.post('/shipping-quotes', {
+      ...form.value,
+      lines: eligible.value
+        .filter((r) => selected.value.includes(r.id))
+        .map((r) => ({ orderId: r.id, quantity: r.shipQuantity })),
+    });
+  } catch (e) {
+    ElMessage.error((e as Error).message);
+  } finally {
+    busy.value = false;
+  }
 }
 async function submit() {
   busy.value = true;
@@ -139,6 +244,28 @@ async function submit() {
         path = '/members/' + body.id + '/update';
         body.fixedPlan1 = body.fixedPlan1 === '' ? null : body.fixedPlan1;
         body.fixedPlan2 = body.fixedPlan2 === '' ? null : body.fixedPlan2;
+        body.salesRateOverride = body.salesRateOverride === '' ? null : body.salesRateOverride;
+        if (
+          form.value.active === false &&
+          initialActive.value &&
+          Number(form.value.childCount) > 0
+        ) {
+          await ElMessageBox.confirm('已有下级用户，确认冻结此点位？', '冻结会员', {
+            confirmButtonText: '确认冻结',
+            cancelButtonText: '取消',
+          });
+          body.confirmDescendants = true;
+        }
+        if (body.phone !== initialPhone.value) {
+          await ElMessageBox.confirm(
+            '将本组主小号的手机号改为 ' +
+              body.phone +
+              '。如该手机号已有主号，将归并点位并停用原登录账号。',
+            '修改手机号',
+            { confirmButtonText: '确认修改', cancelButtonText: '取消' },
+          );
+          body.mergeConfirmed = true;
+        }
         break;
       case 'order':
         path = '/orders';
@@ -162,7 +289,13 @@ async function submit() {
         path = body.id ? '/products/' + body.id + '/update' : '/products';
         break;
       case 'user':
-        path = '/system-users';
+        path = body.id ? '/system-users/' + body.id + '/update' : '/system-users';
+        break;
+      case 'stock':
+        path = '/stock-transfers';
+        break;
+      case 'sync':
+        path = '/sync-upgrades';
         break;
     }
     const result = await api.post(path, body);
@@ -192,13 +325,6 @@ async function trial() {
     busy.value = false;
   }
 }
-async function visitNode(id: string) {
-  try {
-    detail.value = await api.get('/network/' + id);
-  } catch (e) {
-    ElMessage.error((e as Error).message);
-  }
-}
 defineExpose({ open });
 </script>
 <template>
@@ -209,7 +335,84 @@ defineExpose({ open });
     :close-on-click-modal="false"
     destroy-on-close
   >
-    <template v-if="kind === 'detail'">
+    <el-alert v-if="detailError" :title="detailError" type="error" :closable="false" />
+    <template v-if="kind === 'memberDetail'"
+      ><el-descriptions :column="2" border
+        ><el-descriptions-item label="点位">{{ detail.id }}</el-descriptions-item
+        ><el-descriptions-item label="昵称">{{ detail.nickname }}</el-descriptions-item
+        ><el-descriptions-item label="电话">{{ detail.phone }}</el-descriptions-item
+        ><el-descriptions-item label="主号 / 小号">{{
+          detail.isMain ? '主号' : '小号' + (Number(detail.sequenceNo) - 1)
+        }}</el-descriptions-item
+        ><el-descriptions-item label="会员等级">{{ grade(detail.grade) }}</el-descriptions-item
+        ><el-descriptions-item label="董事等级">{{ detail.directorGrade }}星</el-descriptions-item
+        ><el-descriptions-item label="店铺">{{ label(detail.shopType) }}</el-descriptions-item
+        ><el-descriptions-item label="等级版本">{{ detail.gradeVersion }}</el-descriptions-item
+        ><el-descriptions-item label="推荐点位">{{ detail.parentId || '无' }}</el-descriptions-item
+        ><el-descriptions-item label="1+2资格">{{
+          detail.planQualified ? '已具备' : '未具备'
+        }}</el-descriptions-item
+        ><el-descriptions-item
+          v-for="f in [
+            ['own', '个人业绩'],
+            ['team', '团队业绩'],
+            ['small', '小市场业绩'],
+          ]"
+          :key="f[0]"
+          :label="f[1]"
+          >¥{{ money(detail[f[0]]) }}</el-descriptions-item
+        ><el-descriptions-item label="奖励积分"
+          >¥{{ money(detail.reward?.balance) }}</el-descriptions-item
+        ><el-descriptions-item label="充值积分"
+          >¥{{ money(detail.recharge?.balance) }}</el-descriptions-item
+        ><el-descriptions-item label="账户状态">{{
+          detail.active ? '正常' : '冻结'
+        }}</el-descriptions-item
+        ><el-descriptions-item v-if="detail.remark" label="备注" :span="2">{{
+          detail.remark
+        }}</el-descriptions-item></el-descriptions
+      ></template
+    >
+    <template v-else-if="kind === 'shipmentDetail'"
+      ><el-descriptions :column="2" border
+        ><el-descriptions-item label="申请编号">{{ detail.application?.id }}</el-descriptions-item
+        ><el-descriptions-item label="状态">{{
+          label(detail.application?.status)
+        }}</el-descriptions-item
+        ><el-descriptions-item label="收货人">{{
+          detail.application?.recipient
+        }}</el-descriptions-item
+        ><el-descriptions-item label="电话">{{ detail.application?.phone }}</el-descriptions-item
+        ><el-descriptions-item label="地址">{{ detail.application?.address }}</el-descriptions-item
+        ><el-descriptions-item label="取货方式">{{
+          detail.application?.pickup ? '自提' : '配送'
+        }}</el-descriptions-item
+        ><el-descriptions-item label="商品金额"
+          >¥{{ money(detail.application?.goodsAmount) }}</el-descriptions-item
+        ><el-descriptions-item label="重量 / 运费"
+          >{{ detail.application?.weightKg }}kg / ¥{{
+            money(detail.application?.freightAmount)
+          }}</el-descriptions-item
+        ><el-descriptions-item label="物流"
+          >{{ detail.application?.carrier }}
+          {{ detail.application?.tracking }}</el-descriptions-item
+        ><el-descriptions-item label="发货人">{{
+          detail.application?.shippedBy || '尚未发货'
+        }}</el-descriptions-item></el-descriptions
+      ><el-table :data="detail.lines || []"
+        ><el-table-column prop="orderId" label="订单编号" min-width="200" /><el-table-column
+          label="类型"
+          ><template #default="{ row }">{{ label(row.orderType) }}</template></el-table-column
+        ><el-table-column prop="quantity" label="本次发货数量" /><el-table-column label="撤销标记"
+          ><template #default="{ row }"
+            ><el-tag v-if="row.cancelled || row.orderCancelled" type="danger">订单已撤销</el-tag
+            ><span v-else>正常</span></template
+          ></el-table-column
+        ></el-table
+      ></template
+    >
+    <template v-else-if="kind === 'detail'">
+      <p v-if="detail.remark">备注：{{ detail.remark }}</p>
       <div class="detail-banner">
         <span>{{ detail.id }}</span
         ><el-tag>{{ label(orderStatus(detail)) }}</el-tag>
@@ -261,7 +464,7 @@ defineExpose({ open });
       <h3>业务轨迹</h3>
       <el-timeline
         ><el-timeline-item v-for="(h, i) in detail.history" :key="i" :timestamp="h.createdAt"
-          >{{ h.action }} · {{ h.reason }}</el-timeline-item
+          >{{ label(h.action) }} · {{ h.reason }}</el-timeline-item
         ></el-timeline
       >
     </template>
@@ -286,44 +489,53 @@ defineExpose({ open });
           ><template #default="{ row }">{{ money(row.net) }}</template></el-table-column
         ><el-table-column prop="explanation" label="计算依据" min-width="240" /></el-table
     ></template>
-    <template v-else-if="kind === 'network'"
-      ><div class="detail-banner">
-        <b>{{ detail.root?.nickname }} · {{ detail.root?.id }}</b
-        ><el-button v-if="detail.root?.parentId" @click="visitNode(detail.root.parentId)"
-          >查看上级</el-button
-        >
-      </div>
-      <p class="muted">直属点位 {{ detail.total }} 个。</p>
-      <div class="network-grid">
-        <button v-for="n in detail.children" :key="n.id" @click="visitNode(n.id)">
-          <b>{{ n.nickname }}</b
-          ><span>{{ n.id }} · {{ grade(n.grade) }}</span
-          ><small>{{ n.childCount }} 个直属点位 →</small>
-        </button>
-      </div>
-      <el-empty v-if="!detail.children?.length" description="暂无下级点位"
-    /></template>
+    <NetworkView
+      v-else-if="kind === 'network'"
+      :root-id="form.id"
+      @detail="(id) => open('memberDetail', { id })"
+    />
     <el-form v-else :model="form" label-position="top" class="dialog-form" @submit.prevent="submit">
+      <el-form-item
+        v-if="['member', 'editMember', 'order'].includes(kind)"
+        label="备注"
+        class="wide"
+        ><el-input v-model="form.remark" type="textarea" :maxlength="1000" :rows="2"
+      /></el-form-item>
       <template v-if="kind === 'member'"
         ><el-form-item label="昵称"><el-input v-model="form.nickname" /></el-form-item
         ><el-form-item label="手机号（保留前导零）"
           ><el-input v-model="form.phone" inputmode="numeric" /></el-form-item
         ><el-form-item label="推荐点位"
-          ><el-select v-model="form.parentId" filterable
-            ><el-option
-              v-for="p in state.points"
-              :key="p.id"
-              :label="p.nickname + ' / ' + p.id"
-              :value="p.id" /></el-select></el-form-item
+          ><MemberPicker v-model="form.parentId" clearable /></el-form-item
         ><el-form-item label="点位类型"
           ><el-checkbox v-model="form.subPoint">同手机号小号</el-checkbox
           ><el-checkbox v-model="form.emptyPoint">空点</el-checkbox></el-form-item
-        ></template
-      >
+        ><template v-if="form.emptyPoint"
+          ><el-form-item label="会员等级"
+            ><el-input-number v-model="form.grade" :min="0" :max="7" /></el-form-item
+          ><el-form-item label="董事等级"
+            ><el-input-number v-model="form.directorGrade" :min="0" :max="6" /></el-form-item
+          ><el-form-item
+            v-for="f in [
+              ['manualOwn', '个人业绩'],
+              ['manualTeam', '团队业绩'],
+              ['manualSmall', '小市场业绩'],
+            ]"
+            :key="f[0]"
+            :label="f[1]"
+            ><el-input v-model="form[f[0]]" /></el-form-item></template
+      ></template>
       <template v-if="kind === 'editMember'"
         ><el-form-item label="昵称"><el-input v-model="form.nickname" /></el-form-item
         ><el-form-item label="手机号"
           ><el-input v-model="form.phone" inputmode="numeric" /></el-form-item
+        ><el-form-item v-if="globalCan('system:write')" label="所属部门"
+          ><el-select v-model="form.department"
+            ><el-option
+              v-for="d in departments.filter((x) => x.active)"
+              :key="d.id"
+              :value="d.id"
+              :label="d.name" /></el-select></el-form-item
         ><el-form-item label="会员等级"
           ><el-select v-model="form.grade"
             ><el-option
@@ -335,9 +547,11 @@ defineExpose({ open });
           ><el-input-number v-model="form.directorGrade" :min="0" :max="6" /></el-form-item
         ><el-form-item label="等级版本"
           ><el-select v-model="form.gradeVersion"
-            ><el-option label="v2 当前标准" value="v2" /><el-option
-              label="v1 历史对照"
-              value="v1" /></el-select></el-form-item
+            ><el-option
+              v-for="version in Object.keys(state.config.rules?.gradeVersions || {})"
+              :key="version"
+              :label="version"
+              :value="version" /></el-select></el-form-item
         ><el-form-item label="店铺身份"
           ><el-select v-model="form.shopType"
             ><el-option
@@ -378,15 +592,17 @@ defineExpose({ open });
         ><el-form-item label="账户状态"
           ><el-switch v-model="form.active" active-text="正常" inactive-text="冻结" /></el-form-item
         ><el-form-item label="变更原因"><el-input v-model="form.reason" /></el-form-item
+        ><el-form-item label="个人销售比例（留空按等级）"
+          ><el-input
+            :model-value="form.salesRateOverride === '' ? '' : Number(form.salesRateOverride) * 100"
+            @update:model-value="
+              (v: string | number) =>
+                (form.salesRateOverride = v === '' ? '' : String(Number(v) / 100))
+            "
+            placeholder="百分比" /></el-form-item
       ></template>
       <template v-if="kind === 'order'"
-        ><el-form-item label="购买会员点位"
-          ><el-select v-model="form.pointId" filterable
-            ><el-option
-              v-for="p in state.points"
-              :key="p.id"
-              :label="p.nickname + ' / ' + p.id"
-              :value="p.id" /></el-select></el-form-item
+        ><el-form-item label="购买会员点位"><MemberPicker v-model="form.pointId" /></el-form-item
         ><el-form-item label="购买类型"
           ><el-select v-model="form.type" @change="quote = null"
             ><el-option
@@ -446,24 +662,45 @@ defineExpose({ open });
           ><el-input v-model="form.address" /></el-form-item
         ><el-form-item class="wide" label="选择订单及本次发货数量"
           ><div class="shipment-options">
+            <div>
+              <el-button :loading="busy" @click="selectAll">全选可发货订单</el-button
+              ><el-button @click="selected = []">清空选择</el-button>
+            </div>
             <div
               v-for="o in eligible.filter(
-                (x) => !x.cancelled && x.availableQuantity > 0 && !!x.pickup === !!form.pickup,
+                (x) => (x.cancelled || x.availableQuantity > 0) && !!x.pickup === !!form.pickup,
               )"
               :key="o.id"
             >
-              <el-checkbox v-model="selected" :value="o.id"
-                >{{ o.id }} · {{ label(o.orderType) }} · 剩余{{
-                  o.availableQuantity
-                }}瓶</el-checkbox
+              <el-checkbox v-model="selected" :value="o.id" :disabled="o.cancelled"
+                >{{ o.id }} · {{ label(o.orderType) }} · 剩余{{ o.availableQuantity }}瓶
+                {{ o.cancelled ? '· 已撤销' : '' }}</el-checkbox
               ><el-input-number
                 v-model="o.shipQuantity"
                 :min="1"
                 :max="o.availableQuantity"
                 size="small"
+                :disabled="o.cancelled"
               />
-            </div></div></el-form-item
-      ></template>
+            </div>
+            <el-button
+              v-if="eligible.length < eligibleTotal"
+              @click="
+                eligiblePage++;
+                loadEligible(false);
+              "
+              >加载更多订单</el-button
+            >
+          </div></el-form-item
+        ><el-form-item class="wide"
+          ><el-button :loading="busy" @click="priceShipping">计算运费</el-button
+          ><span v-if="shippingQuote"
+            >重量 {{ shippingQuote.weightKg }}kg · 运费 ¥{{
+              money(shippingQuote.freightAmount)
+            }}</span
+          ></el-form-item
+        ></template
+      >
       <template v-if="kind === 'ship'"
         ><el-alert
           v-if="form.pickup"
@@ -517,6 +754,9 @@ defineExpose({ open });
         ><el-form-item
           v-for="f in [
             { key: 'name', name: '商品名称' },
+            { key: 'channel', name: '渠道' },
+            { key: 'specification', name: '商品规格' },
+            { key: 'imageUrl', name: '列表图片地址' },
             { key: 'firstPrice', name: '首购单价' },
             { key: 'repeatOne', name: '一星复购单价' },
             { key: 'repeatOther', name: '二星及以上复购单价' },
@@ -538,6 +778,14 @@ defineExpose({ open });
               (v: number | undefined) => (form.subsidyRate = String(Number(v || 0) / 100))
             " /></el-form-item
         ><el-form-item label="上架状态"><el-switch v-model="form.active" /></el-form-item
+        ><el-form-item label="购买类型" class="wide"
+          ><el-checkbox-group
+            :model-value="String(form.purchaseTypes).split(',')"
+            @change="(v: string[]) => (form.purchaseTypes = v.join(','))"
+            ><el-checkbox v-for="type in ['NEW', 'FIRST', 'REPEAT']" :key="type" :value="type">{{
+              label(type)
+            }}</el-checkbox></el-checkbox-group
+          ></el-form-item
         ><el-form-item
           v-for="(_, i) in form.differential"
           :key="i"
@@ -552,6 +800,7 @@ defineExpose({ open });
             { key: 'phone', name: '电话' },
             { key: 'password', name: '初始密码（至少10位）' },
           ]"
+          v-show="f.key !== 'password' || !form.id"
           :key="f.key"
           :label="f.name"
           ><el-input
@@ -560,16 +809,65 @@ defineExpose({ open });
         ><el-form-item label="角色"
           ><el-select v-model="form.role"
             ><el-option
-              v-for="r in Object.keys(state.config.roles || {}).filter((x) => x !== 'MEMBER')"
-              :key="r"
-              :value="r"
-              :label="label(r)" /></el-select></el-form-item
+              v-for="r in roles.filter((x) => x.active)"
+              :key="r.id"
+              :value="r.id"
+              :label="r.name" /></el-select></el-form-item
+        ><el-form-item label="部门"
+          ><el-select v-model="form.department"
+            ><el-option
+              v-for="d in departments.filter((x) => x.active)"
+              :key="d.id"
+              :value="d.id"
+              :label="d.name" /></el-select></el-form-item
+        ><el-form-item label="邮箱"><el-input v-model="form.email" /></el-form-item
+        ><el-form-item label="岗位"
+          ><el-select v-model="form.postCode" clearable
+            ><el-option
+              v-for="p in posts.filter((x) => x.active)"
+              :key="p.id"
+              :value="p.id"
+              :label="p.name" /></el-select></el-form-item
+        ><el-form-item label="账户状态"
+          ><el-switch v-model="form.active" active-text="正常" inactive-text="停用"
+        /></el-form-item>
+        ></template
+      >
+      <template v-if="kind === 'stock'"
+        ><el-form-item label="转出店铺"
+          ><el-select v-model="form.fromId"
+            ><el-option
+              v-for="s in state.catalog.shops"
+              :key="s.id"
+              :value="s.id"
+              :label="s.nickname + ' / ' + s.id" /></el-select></el-form-item
+        ><el-form-item label="接收店铺"
+          ><el-select v-model="form.toId"
+            ><el-option
+              v-for="s in state.catalog.shops.filter((x: Row) => x.id !== form.fromId)"
+              :key="s.id"
+              :value="s.id"
+              :label="s.nickname + ' / ' + s.id" /></el-select></el-form-item
+        ><el-form-item label="充值积分金额"><el-input v-model="form.amount" /></el-form-item
+      ></template>
+      <template v-if="kind === 'sync'"
+        ><el-form-item label="发起点位"><MemberPicker v-model="form.fromPoint" /></el-form-item
+        ><el-form-item label="升级点位（本人或上级）"
+          ><MemberPicker v-model="form.targetPoint" /></el-form-item
+        ><el-form-item label="申请等级"
+          ><el-select v-model="form.expectedGrade"
+            ><el-option
+              v-for="g in 7"
+              :key="g"
+              :value="g"
+              :label="grade(g)" /></el-select></el-form-item
+        ><el-form-item label="申请原因"><el-input v-model="form.reason" /></el-form-item
       ></template>
     </el-form>
     <template #footer
       ><el-button @click="visible = false">关闭</el-button
       ><el-button
-        v-if="!['detail', 'batch', 'network'].includes(kind)"
+        v-if="!['detail', 'batch', 'network', 'memberDetail', 'shipmentDetail'].includes(kind)"
         type="primary"
         :loading="busy"
         @click="submit"

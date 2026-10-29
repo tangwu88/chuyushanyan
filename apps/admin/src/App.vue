@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { api, state, hydrate, can } from './state';
-import { label } from '@chuyu/shared';
+import { label, type Row } from '@chuyu/shared';
 import DashboardView from './views/DashboardView.vue';
 import DataView from './views/DataView.vue';
 import RulesView from './views/RulesView.vue';
@@ -18,9 +18,40 @@ const nav = [
   { id: 'rules', name: '规则中心', mark: '⌘', permission: 'rules:read' },
   { id: 'system', name: '系统设置', mark: '⚙', permission: 'audit:read' },
 ];
-const visibleNav = computed(() =>
-  nav.filter((n) => can(n.permission) || (n.id === 'system' && can('system:write'))),
-);
+const visibleNav = computed(() => {
+  const configured: Row[] = state.config.menus || [];
+  if (!configured.length)
+    return nav
+      .filter((n) => can(n.permission) || (n.id === 'system' && can('system:write')))
+      .map((n) => ({ ...n, route: '/' + n.id, children: [] as Row[] }));
+  return configured
+    .filter((m) => !m.parentId && m.type !== 'BUTTON' && m.active)
+    .map((m) => {
+      const children = configured.filter(
+        (c) =>
+          c.parentId === m.id &&
+          c.type !== 'BUTTON' &&
+          c.active &&
+          (!c.permission || can(c.permission)),
+      );
+      const route = String(m.route || children[0]?.route || '');
+      const id = route.split('?')[0].slice(1);
+      const base = nav.find((n) => n.id === id);
+      return {
+        id,
+        name: m.name,
+        mark: m.icon || base?.mark || '',
+        permission: m.permission || base?.permission || '',
+        route,
+        children,
+      };
+    })
+    .filter(
+      (n) =>
+        nav.some((base) => base.id === n.id) &&
+        (can(n.permission) || (n.id === 'system' && can('system:write')) || n.children.length),
+    );
+});
 const title = computed(() => nav.find((n) => n.id === page.value)?.name || '经营管理');
 const username = ref('admin'),
   password = ref(''),
@@ -146,13 +177,17 @@ onMounted(async () => {
       >
       <p class="nav-caption">业务管理</p>
       <nav>
-        <router-link
-          v-for="n in visibleNav"
-          :key="n.id"
-          :to="'/' + n.id"
-          :class="{ active: page === n.id }"
-          ><span class="nav-icon">{{ n.mark }}</span
-          >{{ n.name }}</router-link
+        <template v-for="n in visibleNav" :key="n.route"
+          ><router-link :to="n.route" :class="{ active: page === n.id }"
+            ><span class="nav-icon">{{ n.mark }}</span
+            >{{ n.name }}</router-link
+          ><router-link
+            v-for="child in n.children"
+            :key="child.id"
+            :to="child.route"
+            class="nav-child"
+            >{{ child.name }}</router-link
+          ></template
         >
       </nav>
       <div class="sidebar-bottom">

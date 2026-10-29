@@ -116,7 +116,12 @@ check(
 await rejects(auditor, '/orders/' + order.id + '/activate', {}, 403);
 check('监察角色不能激活订单', true);
 await post(admin, '/orders/' + order.id + '/activate');
-const afterActivate = await get(token, '/orders/' + order.id);
+const afterActivate = await get(admin, '/orders/' + order.id);
+const memberOrder = await get(token, '/orders/' + order.id);
+check(
+  '会员订单详情不暴露其他会员奖金或关系快照',
+  !memberOrder.memberSnapshot && memberOrder.awards.every((a) => a.recipientId === member.id),
+);
 check(
   '激活后产生真实销售奖并保存版本',
   afterActivate.activationStatus === 'ACTIVE' &&
@@ -359,3 +364,4 @@ await fs.writeFile(
   JSON.stringify(result, null, 2) + '\n',
 );
 console.log('MySQL接口验收通过：' + checks.length + '项');
+await import('./requirements-api.mjs');

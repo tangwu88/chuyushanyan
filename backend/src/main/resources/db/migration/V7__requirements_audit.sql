@@ -1,0 +1,69 @@
+CREATE TABLE managed_configs (
+ id VARCHAR(64) NOT NULL, resource VARCHAR(40) NOT NULL, name VARCHAR(128) NOT NULL,
+ data_json LONGTEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE,
+ deleted BOOLEAN NOT NULL DEFAULT FALSE, sort_no INT NOT NULL DEFAULT 0,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(resource,id)
+);
+CREATE TABLE login_logs (
+ id VARCHAR(64) PRIMARY KEY, username VARCHAR(64) NOT NULL, user_id VARCHAR(64),
+ ip VARCHAR(64), user_agent VARCHAR(512), status VARCHAR(16) NOT NULL,
+ message VARCHAR(256), deleted BOOLEAN NOT NULL DEFAULT FALSE,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_login_time ON login_logs(created_at,id);
+CREATE TABLE member_cancellations (
+ id VARCHAR(64) PRIMARY KEY, point_id VARCHAR(64) NOT NULL, snapshot_json LONGTEXT NOT NULL,
+ reason VARCHAR(512) NOT NULL, actor_id VARCHAR(64) NOT NULL, restored BOOLEAN NOT NULL DEFAULT FALSE,
+ restored_at TIMESTAMP, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE sync_upgrades (
+ id VARCHAR(64) PRIMARY KEY, from_point VARCHAR(64) NOT NULL, target_point VARCHAR(64) NOT NULL,
+ expected_grade INT NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+ reason VARCHAR(512), request_by VARCHAR(64) NOT NULL, review_by VARCHAR(64), reviewed_at TIMESTAMP,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE report_snapshots (
+ id VARCHAR(64) PRIMARY KEY, report_type VARCHAR(32) NOT NULL, snapshot_date DATE NOT NULL,
+ data_json LONGTEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(report_type,snapshot_date)
+);
+ALTER TABLE member_points ADD COLUMN department VARCHAR(64) NOT NULL DEFAULT '初语山言';
+ALTER TABLE member_points ADD COLUMN created_by VARCHAR(64) NOT NULL DEFAULT 'SYSTEM';
+ALTER TABLE member_points ADD COLUMN sales_rate_override DECIMAL(12,8);
+ALTER TABLE app_users ADD COLUMN email VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE app_users ADD COLUMN gender VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN';
+ALTER TABLE app_users ADD COLUMN post_code VARCHAR(64) NOT NULL DEFAULT '';
+ALTER TABLE app_users ADD COLUMN failed_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE app_users ADD COLUMN locked_until TIMESTAMP;
+ALTER TABLE withdrawals ADD COLUMN bank_name VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE withdrawals ADD COLUMN account_name VARCHAR(64) NOT NULL DEFAULT '';
+ALTER TABLE withdrawals ADD COLUMN identity_mask VARCHAR(64) NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN channel VARCHAR(64) NOT NULL DEFAULT '初语山言';
+ALTER TABLE products ADD COLUMN purchase_types VARCHAR(64) NOT NULL DEFAULT 'NEW,FIRST,REPEAT';
+ALTER TABLE products ADD COLUMN image_url LONGTEXT;
+ALTER TABLE products ADD COLUMN specification VARCHAR(128) NOT NULL DEFAULT '瓶';
+ALTER TABLE products ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE products ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE fulfilment_applications ADD COLUMN weight_kg DECIMAL(12,3) NOT NULL DEFAULT 0;
+ALTER TABLE fulfilment_applications ADD COLUMN goods_amount DECIMAL(20,2) NOT NULL DEFAULT 0;
+ALTER TABLE fulfilment_applications ADD COLUMN freight_amount DECIMAL(20,2) NOT NULL DEFAULT 0;
+ALTER TABLE fulfilment_applications ADD COLUMN freight_snapshot LONGTEXT;
+ALTER TABLE topups ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE topups ADD COLUMN reason VARCHAR(512);
+ALTER TABLE topups ADD COLUMN reviewed_at TIMESTAMP;
+ALTER TABLE topups ADD COLUMN archived BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE shop_orders ADD COLUMN archived BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE ledger_entries ADD COLUMN archived BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE audit_logs ADD COLUMN ip VARCHAR(64);
+ALTER TABLE audit_logs ADD COLUMN request_method VARCHAR(16);
+ALTER TABLE audit_logs ADD COLUMN request_url VARCHAR(512);
+ALTER TABLE audit_logs ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE audit_logs ADD COLUMN result_status VARCHAR(16) NOT NULL DEFAULT 'SUCCESS';
+ALTER TABLE audit_logs ADD COLUMN elapsed_ms BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX idx_point_department ON member_points(department,id);
+CREATE INDEX idx_sync_status ON sync_upgrades(status,created_at,id);
+CREATE INDEX idx_cancellation_point ON member_cancellations(point_id,created_at,id);
+CREATE INDEX idx_ledger_transaction ON ledger_entries(transaction_id,point_id);
+CREATE INDEX idx_transaction_kind_time ON ledger_transactions(kind,created_at,id);

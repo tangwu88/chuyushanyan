@@ -49,7 +49,11 @@ public class OrderService {
               || Actors.owns(members.point(text(order, "shopId")))
               || Actors.owns(members.point(text(order, "payerId"))),
           "无权查看此订单");
-    else Actors.require("orders:read");
+    else {
+      Actors.require("orders:read");
+      Actors.requireAnyPoint(
+          members.point(text(order, "pointId")), members.point(text(order, "shopId")));
+    }
   }
 
   public Map<String, Object> quote(Map<String, Object> b) {
@@ -72,12 +76,30 @@ public class OrderService {
             && Actors.owns(members.point(text(member, "parentId")));
     if (Actors.member())
       require(Actors.owns(member) || Actors.owns(shop) || assistingNew, "只能为本人、所管理店铺或本人新邀请会员创建订单");
-    else Actors.require("orders:create");
+    else {
+      Actors.require("orders:create");
+      Actors.requireAnyPoint(member, shop);
+    }
     require(Set.of("NEW", "FIRST", "REPEAT").contains(type), "购买类型错误");
     int quantity = integer(b.get("quantity"));
     require(quantity > 0 && quantity <= 10000, "购买数量需为1至10000");
     if (type.equals("NEW")) require(!bool(member.get("activated")), "此点位已激活，请选择首购或复购");
     else require(bool(member.get("activated")), "请先完成新人订单激活");
+    if (type.equals("NEW"))
+      require(
+          db.count(
+                  "SELECT COUNT(*) FROM shop_orders WHERE point_id=#{p.id} AND order_type='NEW' AND"
+                      + " cancelled=FALSE AND activation_status='PENDING' AND"
+                      + " (payment_status='PAID' OR created_at>=#{p.since})",
+                  map(
+                      "id",
+                      point,
+                      "since",
+                      Timestamp.valueOf(LocalDateTime.now(Store.ZONE).minusMinutes(15))))
+              == 0,
+          "此点位已有待处理的新人订单，请在订单列表继续处理");
+    require(
+        Arrays.asList(text(product, "purchaseTypes").split(",")).contains(type), "此商品不支持所选购买类型");
     int grade = integer(member.get("grade")), remaining = 10000;
     BigDecimal price = d(product.get("firstPrice"));
     if (type.equals("REPEAT")) {
@@ -160,11 +182,26 @@ public class OrderService {
         "pickup",
         bool(b.get("pickup")),
         "product",
-        product);
+        product,
+        "buyerName",
+        member.get("nickname"),
+        "parentId",
+        member.get("parentId"),
+        "parentName",
+        text(member, "parentId").isBlank()
+            ? "无"
+            : members.point(text(member, "parentId")).get("nickname"),
+        "shopName",
+        shop.get("nickname"),
+        "productName",
+        product.get("name"));
   }
 
   public Map<String, Object> create(Map<String, Object> b) {
     var q = quote(b);
+    String remark = text(b, "remark");
+    require(remark.length() <= 1000, "订单备注最多1000字");
+    q.put("remark", remark);
     String id = "OD" + id().substring(0, 16).toUpperCase(Locale.ROOT);
     q.put("id", id);
     q.put("snapshot", write(rules.current()));
@@ -172,8 +209,8 @@ public class OrderService {
     q.put("memberSnapshot", write(q.get("product")));
     db.exec(
         "INSERT INTO"
-            + " shop_orders(id,point_id,shop_id,payer_id,product_id,order_type,quantity,unit_price,total,reward_paid,cash_paid,payment_status,activation_status,fulfilment_status,pickup,rule_id,rule_snapshot,member_snapshot,payment_method)"
-            + " VALUES(#{p.id},#{p.pointId},#{p.shopId},#{p.payerId},#{p.productId},#{p.type},#{p.quantity},#{p.unitPrice},#{p.total},#{p.rewardAmount},#{p.cashAmount},'UNPAID','PENDING','UNFULFILLED',#{p.pickup},#{p.rule},#{p.snapshot},#{p.memberSnapshot},#{p.paymentMethod})",
+            + " shop_orders(id,point_id,shop_id,payer_id,product_id,order_type,quantity,unit_price,total,reward_paid,cash_paid,payment_status,activation_status,fulfilment_status,pickup,rule_id,rule_snapshot,member_snapshot,payment_method,remark)"
+            + " VALUES(#{p.id},#{p.pointId},#{p.shopId},#{p.payerId},#{p.productId},#{p.type},#{p.quantity},#{p.unitPrice},#{p.total},#{p.rewardAmount},#{p.cashAmount},'UNPAID','PENDING','UNFULFILLED',#{p.pickup},#{p.rule},#{p.snapshot},#{p.memberSnapshot},#{p.paymentMethod},#{p.remark})",
         q);
     db.audit("ORDER_CREATE", id, null, q, "创建订单");
     return order(id);
@@ -244,7 +281,10 @@ public class OrderService {
   public Map<String, Object> activate(String id) {
     var o = order(id);
     if (Actors.member()) require(Actors.owns(members.point(text(o, "shopId"))), "仅代办店铺可激活新人订单");
-    else Actors.require("orders:activate");
+    else {
+      Actors.require("orders:activate");
+      Actors.requireAnyPoint(members.point(text(o, "pointId")), members.point(text(o, "shopId")));
+    }
     activateInternal(id);
     return order(id);
   }
@@ -258,6 +298,9 @@ public class OrderService {
             && text(o, "activationStatus").equals("PENDING"),
         "订单当前不能激活");
     var buyer = members.point(text(o, "pointId"));
+    require(
+        bool(buyer.get("active")) && bool(members.point(text(o, "shopId")).get("active")),
+        "会员或店铺已冻结，不能激活订单");
     require(
         db.count(
                 "SELECT COUNT(*) n FROM member_points WHERE owner_id=#{p.owner} AND"
@@ -350,8 +393,17 @@ public class OrderService {
 
   public Map<String, Object> cancel(String id, Map<String, Object> b) {
     var o = order(id);
-    if (Actors.member()) require(Actors.owns(members.point(text(o, "shopId"))), "请由代办店铺处理撤销");
-    else Actors.require("orders:cancel");
+    if (Actors.member())
+      require(
+          Actors.owns(members.point(text(o, "shopId")))
+              || (text(o, "paymentStatus").equals("UNPAID")
+                  && (Actors.owns(members.point(text(o, "pointId")))
+                      || Actors.owns(members.point(text(o, "payerId"))))),
+          "已付款订单请由代办店铺处理撤销");
+    else {
+      Actors.require("orders:cancel");
+      Actors.requireAnyPoint(members.point(text(o, "pointId")), members.point(text(o, "shopId")));
+    }
     require(!bool(o.get("cancelled")), "订单已撤销");
     String why = text(b, "reason");
     require(!why.isBlank(), "请填写撤销原因");
@@ -390,6 +442,19 @@ public class OrderService {
             + " id=#{p.id}",
         map("id", id));
     db.exec("UPDATE fulfilment_lines SET cancelled=TRUE WHERE order_id=#{p.id}", map("id", id));
+    for (var app :
+        db.list(
+            "SELECT DISTINCT application_id FROM fulfilment_lines WHERE order_id=#{p.id}",
+            map("id", id)))
+      if (db.count(
+              "SELECT COUNT(*) FROM fulfilment_lines WHERE application_id=#{p.id} AND"
+                  + " cancelled=FALSE",
+              map("id", app.get("applicationId")))
+          == 0)
+        db.exec(
+            "UPDATE fulfilment_applications SET status='VOID',reason='所含订单已全部撤销' WHERE id=#{p.id}"
+                + " AND status IN ('PENDING','APPROVED')",
+            map("id", app.get("applicationId")));
     if (text(o, "activationStatus").equals("ACTIVE")) {
       var points = performance.points();
       Map<String, Map<String, Object>> ix = new HashMap<>();

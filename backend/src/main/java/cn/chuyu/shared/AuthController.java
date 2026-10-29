@@ -14,27 +14,56 @@ import org.springframework.web.bind.annotation.*;
 public class AuthController {
   private final Store db;
   private final BCryptPasswordEncoder encoder;
+  private final AccessPolicy policy;
 
-  public AuthController(Store db, BCryptPasswordEncoder encoder) {
+  public AuthController(Store db, BCryptPasswordEncoder encoder, AccessPolicy policy) {
     this.db = db;
     this.encoder = encoder;
+    this.policy = policy;
   }
 
   @PostMapping("/login")
-  public Object login(@RequestBody Map<String, Object> b) {
+  public Object login(
+      @RequestBody Map<String, Object> b, jakarta.servlet.http.HttpServletRequest request) {
     var u =
         db.one(
             "SELECT * FROM app_users WHERE username=#{p.username} AND active=TRUE",
             map("username", text(b, "username")));
-    require(u != null && encoder.matches(text(b, "password"), text(u, "passwordHash")), "账号或密码错误");
-    if (text(u, "role").equals("MEMBER"))
-      require(
-          db.count(
-                  "SELECT COUNT(*) n FROM member_points WHERE owner_id=#{p.owner} AND active=TRUE",
-                  map("owner", u.get("ownerId")))
-              > 0,
-          "账号不存在");
+    if (u != null
+        && u.get("lockedUntil") != null
+        && LocalDateTime.parse(text(u, "lockedUntil")).isAfter(LocalDateTime.now(Store.ZONE))) {
+      loginLog(text(b, "username"), u, request, "FAILED", "账号暂时锁定");
+      throw new BusinessException("账号暂时锁定，请稍后重试或联系管理员");
+    }
+    if (u == null || !encoder.matches(text(b, "password"), text(u, "passwordHash"))) {
+      if (u != null)
+        db.exec(
+            "UPDATE app_users SET locked_until=CASE WHEN failed_attempts>=4 THEN #{p.until} ELSE"
+                + " locked_until END,failed_attempts=failed_attempts+1 WHERE id=#{p.id}",
+            map(
+                "id",
+                u.get("id"),
+                "until",
+                Timestamp.valueOf(LocalDateTime.now(Store.ZONE).plusMinutes(15))));
+      loginLog(text(b, "username"), u, request, "FAILED", "账号或密码错误");
+      throw new BusinessException("账号或密码错误");
+    }
+    if (policy.actor(u).permissions().isEmpty()) {
+      loginLog(text(b, "username"), u, request, "FAILED", "账号角色已停用");
+      throw new BusinessException("账号角色已停用");
+    }
+    if (text(u, "role").equals("MEMBER")
+        && !(db.count(
+                "SELECT COUNT(*) n FROM member_points WHERE owner_id=#{p.owner} AND active=TRUE",
+                map("owner", u.get("ownerId")))
+            > 0)) {
+      loginLog(text(b, "username"), u, request, "FAILED", "账号不存在");
+      throw new BusinessException("账号不存在");
+    }
     String token = id() + id();
+    db.exec(
+        "UPDATE app_users SET failed_attempts=0,locked_until=NULL WHERE id=#{p.id}",
+        map("id", u.get("id")));
     db.exec(
         "INSERT INTO auth_sessions(token_hash,user_id,expires_at)"
             + " VALUES(#{p.hash},#{p.id},#{p.expiry})",
@@ -45,7 +74,35 @@ public class AuthController {
             u.get("id"),
             "expiry",
             Timestamp.valueOf(LocalDateTime.now(Store.ZONE).plusHours(12))));
+    loginLog(text(b, "username"), u, request, "SUCCESS", "登录成功");
     return map("token", token, "user", safe(u));
+  }
+
+  private void loginLog(
+      String username,
+      Map<String, Object> user,
+      jakarta.servlet.http.HttpServletRequest request,
+      String status,
+      String message) {
+    String ua = Optional.ofNullable(request.getHeader("User-Agent")).orElse("");
+    db.exec(
+        "INSERT INTO login_logs(id,username,user_id,ip,user_agent,status,message)"
+            + " VALUES(#{p.id},#{p.username},#{p.user},#{p.ip},#{p.ua},#{p.status},#{p.message})",
+        map(
+            "id",
+            id(),
+            "username",
+            username.substring(0, Math.min(64, username.length())),
+            "user",
+            user == null ? null : user.get("id"),
+            "ip",
+            request.getRemoteAddr(),
+            "ua",
+            ua.substring(0, Math.min(512, ua.length())),
+            "status",
+            status,
+            "message",
+            message));
   }
 
   private Map<String, Object> safe(Map<String, Object> u) {
@@ -63,7 +120,11 @@ public class AuthController {
         "mustChangePassword",
         u.get("mustChangePassword"),
         "permissions",
-        Actors.PERMISSIONS.getOrDefault(text(u, "role"), Set.of()));
+        policy.actor(u).permissions(),
+        "department",
+        u.get("department"),
+        "dataScope",
+        policy.actor(u).dataScope());
   }
 
   @GetMapping("/me")
