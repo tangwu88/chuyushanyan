@@ -1,0 +1,32 @@
+{
+  "verifiedAt": "2026-10-29T17:00:53.414153+00:00",
+  "java": {
+    "runtime": "Java 21",
+    "command": "TZ=UTC mvn -Duser.timezone=UTC verify",
+    "suites": [
+      {
+        "name": "cn.chuyu.BusinessIntegrationTest",
+        "tests": "18",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "4.223"
+      },
+      {
+        "name": "cn.chuyu.RewardEngineTest",
+        "tests": "45",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "0.249"
+      }
+    ]
+  },
+  "frontend": {
+    "command": "pnpm build",
+    "adminTypecheckAndBuild": "passed",
+    "h5TypecheckAndBuild": "passed"
+  },
+  "database": "MySQL 8.4.13; server global UTC, business connection Asia/Shanghai",
+  "containerExecution": "not_run_on_local_machine"
+}

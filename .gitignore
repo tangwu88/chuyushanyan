@@ -1,0 +1,14 @@
+.tools/
+.runtime/
+node_modules/
+dist/
+target/
+.env
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+docs/requirements-source.json
+docs/verification/*.png
+test-results/
+playwright-report/

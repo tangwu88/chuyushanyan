@@ -1,0 +1,1 @@
+ALTER TABLE shop_orders ADD COLUMN reserved_amount DECIMAL(20,2) NOT NULL DEFAULT 0;

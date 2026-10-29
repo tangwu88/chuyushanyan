@@ -1,0 +1,4 @@
+CREATE TABLE command_results (
+ business_key VARCHAR(220) PRIMARY KEY, request_hash VARCHAR(64) NOT NULL,
+ response_json LONGTEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

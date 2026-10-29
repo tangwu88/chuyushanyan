@@ -1,0 +1,54 @@
+name: Verify Chuyu platform
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4.13
+        env:
+          MYSQL_ROOT_PASSWORD: chuyu_root_demo
+          MYSQL_DATABASE: chuyu_demo
+          MYSQL_USER: chuyu
+          MYSQL_PASSWORD: chuyu_local_demo
+        ports: ['13306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uchuyu -pchuyu_local_demo"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global pnpm@11.25.0
+      - run: pnpm install --frozen-lockfile
+      - run: mvn -B -f backend/pom.xml verify
+      - run: pnpm build
+      - name: Verify MySQL business API
+        shell: bash
+        run: |
+          mkdir -p .runtime
+          java -jar backend/target/chuyu-platform-0.1.0.jar --chuyu.scheduler-enabled=false > .runtime/backend.log 2>&1 &
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:18080/actuator/health > /dev/null; then break; fi
+            sleep 1
+          done
+          pnpm test:api
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification
+          path: |
+            backend/target/surefire-reports/
+            docs/verification/api-acceptance.json
+            .runtime/backend.log

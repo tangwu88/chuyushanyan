@@ -1,0 +1,9 @@
+.git
+.tools
+.runtime
+node_modules
+**/node_modules
+**/dist
+backend/target
+docs/verification
+docs/requirements-source.json

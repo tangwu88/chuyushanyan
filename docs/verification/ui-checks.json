@@ -1,0 +1,43 @@
+{
+  "verifiedAt": "2026-10-29T17:00:53.410245+00:00",
+  "responsiveChecks": [
+    {
+      "client": 375,
+      "page": "home",
+      "scroll": 375,
+      "viewport": 375
+    },
+    {
+      "client": 375,
+      "page": "order",
+      "scroll": 375,
+      "viewport": 390
+    },
+    {
+      "client": 430,
+      "page": "wallet",
+      "scroll": 430,
+      "viewport": 430
+    }
+  ],
+  "horizontalOverflow": false,
+  "consoleErrors": [],
+  "checkedFlows": [
+    "管理后台登录",
+    "经营概览",
+    "规则中心",
+    "会员登录",
+    "375px首页",
+    "390px复购报价150元及月度余量",
+    "430px奖励积分流水",
+    "页面宣传语及内部提示清理",
+    "规则草稿新建、字段编辑、保存、试算及解锁发布",
+    "已发布规则只读",
+    "后台通用控件中文显示"
+  ],
+  "correctedIssues": [
+    "Vue 响应式规则配置不可直接 structuredClone，改用 JSON 深复制",
+    "切换只读版本与草稿时重新建立表单，修正输入框禁用的无障碍状态"
+  ],
+  "scope": "本地浏览器页面检查；规则草稿未发布，不改变当前生效规则。"
+}

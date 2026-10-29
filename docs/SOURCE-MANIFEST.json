@@ -1,0 +1,15 @@
+{
+  "sources": [
+    {
+      "name": "原系统代码.zip",
+      "sha256": "3e4510a57c9af8dfafc4aea6bc245018f268c02ef266745db1e7bb8e6faa4041",
+      "use": "业务参考，原文件只读，未导入历史数据"
+    },
+    {
+      "name": "于总项目软件需求说明书(1).xlsx",
+      "sha256": "df0a1691d9414785812b06a7082c949bad91be58fd2d0235c9eccc7987c7b3ef",
+      "use": "业务参考，原文件只读，未导入历史数据"
+    }
+  ],
+  "rawSourcesPublished": false
+}

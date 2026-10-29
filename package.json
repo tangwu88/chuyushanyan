@@ -1,0 +1,26 @@
+{
+  "name": "chuyu-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/admin",
+    "apps/h5",
+    "packages/shared"
+  ],
+  "scripts": {
+    "dev:admin": "pnpm --filter @chuyu/admin dev",
+    "dev:h5": "pnpm --filter @chuyu/h5 dev",
+    "build": "pnpm --filter @chuyu/admin build && pnpm --filter @chuyu/h5 build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test:api": "node scripts/api-acceptance.mjs"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.2",
+    "prettier": "3.6.2",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.2",
+    "vue-tsc": "^3.1.4"
+  },
+  "packageManager": "pnpm@11.25.0"
+}

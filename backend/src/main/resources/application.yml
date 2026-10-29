@@ -1,0 +1,32 @@
+server:
+  port: 18080
+  address: 127.0.0.1
+spring:
+  application:
+    name: chuyu-platform
+  datasource:
+    url: jdbc:mysql://127.0.0.1:13306/chuyu_demo?useUnicode=true&characterEncoding=utf8&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true
+    username: chuyu
+    password: chuyu_local_demo
+  flyway:
+    enabled: true
+  jackson:
+    time-zone: Asia/Shanghai
+    deserialization:
+      use-big-decimal-for-floats: true
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+    default-statement-timeout: 30
+logging:
+  level:
+    root: INFO
+    cn.chuyu: INFO
+chuyu:
+  demo: true
+  scheduler-enabled: true
