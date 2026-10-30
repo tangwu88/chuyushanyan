@@ -77,6 +77,8 @@ docker compose down
 
 ## 验证记录
 
+下一位同事先阅读 [开发交接](docs/HANDOVER.md) 和 [接手检查表](docs/HANDOVER-CHECKLIST.md)，其中包含启动、独立验收库、数据恢复、关键规则和后续优先级。
+
 本地 Java 测试96项、实际 MySQL 接口检查67项通过，管理后台和 H5 的类型检查及生产构建通过。逐项覆盖情况见 [需求与方案复核](docs/REQUIREMENTS-AUDIT.md)，手机适配、20万行导出和独立数据库恢复的结果见 [验收记录](docs/verification/README.md)。
 
 ## 演示边界

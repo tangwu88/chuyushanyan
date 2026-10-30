@@ -1,7 +1,7 @@
 {
-  "verifiedAt": "2026-10-30T03:20:18.383541",
+  "verifiedAt": "2026-10-30T08:01:45.587406",
   "source": "chuyu_demo",
-  "restoredDatabase": "chuyu_restore_20261030_032018",
+  "restoredDatabase": "chuyu_restore_handover_20261030_080141",
   "counts": {
     "member_points": 21,
     "shop_orders": 10,
@@ -12,8 +12,8 @@
     "fulfilment_applications": 2,
     "rule_versions": 5
   },
-  "snapshotSha256": "b6006a3ecdf2ce7802b292acef25d14b2cc0c52045c875547506b79b06758303",
+  "snapshotSha256": "c4fc64269a925bb597e70c3947907c8a8cfd14146e0df98bdf4402908a7101da",
   "restoredSqlHashMatched": true,
   "allWalletBalancesMatched": true,
-  "backupBytes": 850818
+  "backupBytes": 854499
 }
